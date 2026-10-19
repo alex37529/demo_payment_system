@@ -90,3 +90,28 @@ class KafkaConsumer:
         assert self._c is not None, "start() not called"
         async for msg in self._c:
             yield (msg.key.decode() if msg.key else ""), json.loads(msg.value)
+
+
+def unwrap_event(record: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a Debezium-flavoured Kafka record to the canonical event dict.
+
+    Debezium + ``io.debezium.transforms.ExtractNewRecordState`` (with our
+    outbox table) hands us the **outbox row** as the record value, with the
+    actual domain event nested inside the ``payload`` column — and because that
+    column is a PG ``JSONB``, it arrives as a **JSON string**:
+        ``{"id":1, "topic":"ledger.events", "payload":"{...}", "status":"..."}``
+
+    Return the inner event dict when present (what the consumer cares about);
+    otherwise pass the record through so a hand-rolled producer (inline dict, no
+    Debezium) degrades gracefully. Pure function — shared by the Profile
+    (phase 5) and Notification (phase 5) ``ledger.events`` consumers.
+    """
+    inner = record.get("payload")
+    if isinstance(inner, str):
+        try:
+            return json.loads(inner)
+        except (json.JSONDecodeError, ValueError):
+            return record
+    if isinstance(inner, dict):
+        return inner
+    return record
