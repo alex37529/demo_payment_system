@@ -22,12 +22,14 @@ from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
 from services.ledger.application import (
+    DeliveryTracker,
     LedgerUseCaseRunner,
     UseCase_CancelReservation,
     UseCase_Debit,
     UseCase_Refund,
     UseCase_Reserve,
 )
+from services.ledger.application.use_cases import TOPIC_LEDGER_EVENTS
 from services.ledger.domain import (
     Account,
     AccountNotFound,
@@ -118,6 +120,10 @@ def _consumer_enabled() -> bool:
     return os.environ.get("LEDGER_ENABLE_CONSUMER", "1") not in ("0", "false", "False")
 
 
+def _tracker_enabled() -> bool:
+    return os.environ.get("LEDGER_ENABLE_TRACKER", "1") not in ("0", "false", "False")
+
+
 def attach_ledger(app: FastAPI) -> None:
     """Wire the ledger service onto an existing FastAPI app (shared.observability)."""
     from contextlib import asynccontextmanager
@@ -131,29 +137,39 @@ def attach_ledger(app: FastAPI) -> None:
     app.state.ledger_runner = runner
     app.state.ledger_engine = engine
 
+    brokers = os.environ.get("KAFKA_BROKERS", "kafka:9092")
+    tracker = DeliveryTracker(brokers=brokers, session_factory=sf,
+                              topic=TOPIC_LEDGER_EVENTS)
+    app.state.ledger_tracker = tracker
+
     register_exception_handlers(app)
-    register_routes(app)
+    register_routes(app, tracker)
 
     @asynccontextmanager
     async def _ledger_lifespan(_app):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        task = None
+        consumer_task = None
+        tracker_task = None
         if _consumer_enabled():
             from services.ledger import kafka_consumer
 
-            brokers = os.environ.get("KAFKA_BROKERS", "kafka:9092")
-            task = asyncio.create_task(
+            consumer_task = asyncio.create_task(
                 kafka_consumer.run_consumer(brokers=brokers, runner=runner),
                 name="ledger-commands")
-            app.state.ledger_consumer_task = task
-        log.info("ledger ready (dsn=%s, consumer=%s)", dsn.split("@")[-1],
-                 _consumer_enabled())
+        if _tracker_enabled():
+            tracker_task = asyncio.create_task(
+                tracker.run(),
+                name="ledger-outbox-tracker")
+            log.info("ledger outbox tracker started (%s)", brokers)
+        log.info("ledger ready (dsn=%s, consumer=%s, tracker=%s)", dsn.split("@")[-1],
+                 _consumer_enabled(), _tracker_enabled())
         try:
             yield
         finally:
-            if task is not None and not task.done():
-                task.cancel()
+            for t in (consumer_task, tracker_task):
+                if t is not None and not t.done():
+                    t.cancel()
             await engine.dispose()
             log.info("ledger engine disposed")
 
@@ -205,7 +221,32 @@ async def _run_command(app: FastAPI, uc_cls, account_id: str, body: LedgerComman
     )
 
 
-def register_routes(app: FastAPI) -> None:
+def register_routes(app: FastAPI, tracker: DeliveryTracker) -> None:
+    @app.post("/v1/outbox/sweep")
+    async def _sweep_outbox():
+        """Manually run one outbox-delivery sweep (ops / smoke)."""
+        counts = await tracker.sweep_once()
+        return JSONResponse({"ok": True, "counts": counts})
+
+    @app.get("/v1/outbox")
+    async def _list_outbox(limit: int = 20):
+        from sqlalchemy import select
+
+        from shared.outbox import OutboxEvent
+
+        sf = app.state.ledger_runner.session_factory
+        async with sf() as s:
+            rows = (await s.execute(
+                select(OutboxEvent).order_by(OutboxEvent.created_at.desc())
+                .limit(min(200, max(1, limit)))
+            )).scalars().all()
+            return [{
+                "event_id": r.event_id, "topic": r.topic, "status": r.status,
+                "published_at": r.published_at.isoformat() if r.published_at else None,
+                "last_error": r.last_error,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            } for r in rows]
+
     @app.post("/v1/accounts/{account_id}/debit", response_model=CommandOut)
     async def debit(account_id: str, body: LedgerCommandIn):
         return await _run_command(app, UseCase_Debit, account_id, body)
