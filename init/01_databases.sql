@@ -104,4 +104,22 @@ CREATE INDEX IF NOT EXISTS idx_sagas_state   ON sagas (state);
 ALTER TABLE sagas OWNER TO fintech;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO fintech;
 
+-- Phase 4 — intake idempotency (the `intake` bounded context owns this table).
+-- `idempotency_keys`: persistent mirror of the Redis `idem:{key}` entry
+-- (spec §3.3 "dual-write"): survives Redis restart; source for cached response
+-- and GET /v1/payments/{id}. `payment_id` is indexed for that lookup.
+\connect intake
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key         VARCHAR(191)  PRIMARY KEY,
+    payment_id  VARCHAR(64),
+    response    JSON,
+    ttl_until   TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_idem_payment ON idempotency_keys (payment_id);
+CREATE INDEX IF NOT EXISTS idx_idem_ttl     ON idempotency_keys (ttl_until);
+ALTER TABLE idempotency_keys OWNER TO fintech;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO fintech;
+
 -- wal_level=logical is set via the container `command` (postgres -c wal_level=logical).

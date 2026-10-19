@@ -351,4 +351,49 @@ docker compose exec redis redis-cli GET idem:K1
 - [ ] PG: `intake.idempotency_keys` — 1 row.
 - [ ] 6 коммитов в `feat/05-intake`.
 
+---
+
+## 9. Outbox Delivery Tracker (закрытие gap Этапа 2)
+
+Этап 2 (`02_ledger_write_side.md`) оставил колонки `status` / `published_at` /
+`last_error` в `outbox_events`, задокументировал `PENDING / PUBLISHED / FAILED`,
+но **не поставил** компонент, который переключал бы их. В Этапе 4
+(`feat/05-intake`) закрываем этот gap, чтобы жизненный цикл outbox был
+полным до read-side работы.
+
+**Что делает.** `services/ledger/application/delivery_tracker.py` —
+фоновый цикл (запускается в lifespan сервиса ledger, `LEDGER_ENABLE_TRACKER=1`
+по умолчанию) + ручной endpoint. На каждой итерации (`sweep_once()`):
+
+1. читает последние записи на целевом topic Kafka (`ledger.events`, константа
+   `TOPIC_LEDGER_EVENTS` из `use_cases.py`), собирает их `event_id`;
+2. по каждой строке `outbox_events.status = 'pending'`:
+   * `event_id` в собранном множестве → `status='published'`,
+     `published_at=now()`, `last_error=NULL`;
+   * строка старше `horizon_seconds` (по умолчанию 300с) и НЕ в множестве →
+     `status='failed'`, `last_error='no delivery after Ns (topic=...)'`;
+   * иначе → остаётся `pending` (Debezium ещё не забрал).
+
+**Намеренно просто.** Только «последние записи на topic» — без полного
+WAL-скана и bookkeeping offsets. Для PoC достаточно; production-grade можно
+добавить в Этапе 7–8 (DLQ / retries).
+
+**Ручные поверхности (ops / smoke).**
+
+| Метод | Путь | Описание |
+| --- | --- | --- |
+| `POST` | `/v1/outbox/sweep` | один прогон `sweep_once()`, возвращает счётчики |
+| `GET` | `/v1/outbox?limit=N` | последние N строк outbox с `status`/`published_at`/`last_error` |
+
+**Тесты (без живого Kafka).** `tests/ledger/test_delivery_tracker.py` —
+monkeypatch `_detect_delivered_event_ids` фиксированным множеством и
+проверяем transitions: `pending→published` (seen), `pending→failed`
+(age>horizon, unseen), `pending` остаётся (age<horizon, unseen), sweep
+не трогает непиндинги, инъекция детекции short-circuit'ит Kafka. 5 тестов.
+
+> **Примечание.** Компонент живёт в `services/ledger/` (не в `services/intake/`)
+> — это **закрытие gap Этапа 2**, не новая функциональность Этапа 4. В §1
+> (scope) Этапа 4 tracker не заявлен; здесь он задокументирован как
+> сопутствующая работа в ветке `feat/05-intake`.
+
 > **После merge в `main`** — открывать Этап 5 (`05_read_side_sse.md`).
