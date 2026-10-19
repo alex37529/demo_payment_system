@@ -22,8 +22,9 @@ logs: ## Follow logs: make logs svc=gateway
 down: ## Stop + remove the stack (keeps volumes)
 	$(COMPOSE) down
 
-seed: ## Seed 20 users (phase 5; no-op in phase 1)
-	@echo "seed: implemented in phase 5 (read-side). No-op for now."
+seed: ## Seed 20 users + reset their balances (idempotent; needs postgres up)
+	$(COMPOSE) run --rm seed
+	@echo "seed OK — 20 users in ledger.accounts (A2..A21); A1 (test) untouched"
 
 test: ## Run shared unit tests
 	python -m pytest -q

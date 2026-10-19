@@ -222,6 +222,24 @@ def register_routes(app: FastAPI) -> None:
     async def cancel_reservation(account_id: str, body: LedgerCommandIn):
         return await _run_command(app, UseCase_CancelReservation, account_id, body)
 
+    @app.get("/v1/accounts")
+    async def list_accounts():
+        from sqlalchemy import select
+
+        sf = app.state.ledger_runner.session_factory
+        async with sf() as s:
+            rows = (await s.execute(select(AccountRow))).scalars().all()
+            items = [
+                {
+                    "id": r.id, "owner_name": r.owner_name, "currency": r.currency,
+                    "balance": {"value": r.balance, "currency": r.currency},
+                    "reserved": {"value": r.reserved, "currency": r.currency},
+                    "available": {"value": r.balance - r.reserved, "currency": r.currency},
+                }
+                for r in sorted(rows, key=lambda r: (int(r.id[1:]) if r.id[1:].isdigit() else 0, r.id))
+            ]
+        return items
+
     @app.get("/v1/accounts/{account_id}")
     async def get_account(account_id: str):
         sf = app.state.ledger_runner.session_factory

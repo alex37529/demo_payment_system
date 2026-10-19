@@ -99,3 +99,17 @@ async def test_refund_and_cancel_reservation(client):
 async def test_get_missing_account_is_404(client):
     app, c = client
     assert (await c.get("/v1/accounts/NOPE")).status_code == 404
+
+
+async def test_list_accounts_includes_seeded(client):
+    app, c = client
+    from services.ledger.infrastructure.models import AccountRow
+
+    sf = app.state.ledger_runner.session_factory
+    async with sf() as s:
+        s.add(AccountRow(id="A2", owner_name="John Smith", currency="USD", balance=1000000, reserved=0, version=1))
+        await s.commit()
+    r = await c.get("/v1/accounts")
+    assert r.status_code == 200
+    ids = {a["id"] for a in r.json()}
+    assert {"A1", "A2"} <= ids
