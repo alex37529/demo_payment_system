@@ -241,6 +241,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
       INTAKE_DSN: "postgresql+asyncpg://fintech:fintech@postgres:5432/intake"
+      REDIS_URL: "redis://redis:6379/0"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
