@@ -255,6 +255,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
       ORCHESTRATOR_DSN: "postgresql+asyncpg://fintech:fintech@postgres:5432/orchestrator"
+      FRAUD_URL: "http://mock-fraud:8080"
+      ORCH_WATCHDOG_S: "30"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
