@@ -1,0 +1,232 @@
+name: fintech_demo
+
+# Phase 1 (01_environment_abstractions) — data + CDC + observability stack.
+# Port map: doc/tz_v2.md §4.1.
+#
+# CONTAINER NAMING: fintech_ prefix; our services -> <name>_service; infra -> clean base name.
+# Compose SERVICE KEYS keep short names (DNS discovery); container_name sets the docker ps name.
+services:
+  # ---------------------- data stack ----------------------
+  postgres:
+    image: postgres:16
+    container_name: fintech_postgres
+    command: >
+      postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_size=2GB
+    environment:
+      POSTGRES_PASSWORD: fintech
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init/01_databases.sql:/docker-entrypoint-initdb.d/01.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintech || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [fintech]
+
+  redis:
+    image: redis:7-alpine
+    container_name: fintech_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks: [fintech]
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: fintech_kafka
+    environment:
+      KAFKA_NODE_ID: "0"
+      KAFKA_PROCESS_ROLES: "controller,broker"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      retries: 30
+      start_period: 30s
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+      - ./kafka/topics.sh:/opt/kafka/bin/fintech-topics.sh:ro
+    networks: [fintech]
+
+  # Our one-shot helper: creates the 6 topics once kafka is healthy (idempotent).
+  kafka-topics:
+    image: apache/kafka:3.7.0
+    container_name: fintech_kafka_topics_init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_NODE_ID: "0"
+      KAFKA_PROCESS_ROLES: "controller,broker"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+    command: ["/opt/kafka/bin/fintech-topics.sh"]
+    volumes:
+      - ./kafka/topics.sh:/opt/kafka/bin/fintech-topics.sh:ro
+    networks: [fintech]
+
+  kafka-connect:
+    image: debezium/connect:2.5
+    container_name: fintech_kafka_connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-topics:
+        condition: service_completed_successfully
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "fintech-connect"
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: "/kafka/connect"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [fintech]
+
+  # Our one-shot helper: registers the Debezium ledger-outbox connector (stdlib).
+  debezium:
+    image: python:3.11-slim
+    container_name: fintech_debezium_register
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    environment:
+      CONNECT_URL: "http://kafka-connect:8083"
+    volumes:
+      - ./kafka/connect:/app/config:ro
+      - ./scripts/register_connector.py:/app/register.py:ro
+    entrypoint: ["python", "/app/register.py"]
+    networks: [fintech]
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 1
+
+  # ---------------------- observability (third-party) ----------------------
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: fintech_prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules.yml:/etc/prometheus/rules/rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [fintech]
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: fintech_tempo
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./observability/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+    networks: [fintech]
+
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: fintech_loki
+    command: ["-config.file=/etc/loki/loki.conf"]
+    volumes:
+      - ./observability/loki/loki.conf:/etc/loki/loki.conf:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks: [fintech]
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    container_name: fintech_promtail
+    command: ["-config.file=/etc/promtail/promtail.yaml"]
+    volumes:
+      - ./observability/promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - promtail_data:/promtail
+    networks: [fintech]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: fintech_alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks: [fintech]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: fintech_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks: [fintech]
+
+volumes:
+  pgdata:
+  kafka_data:
+  prometheus_data:
+  tempo_data:
+  loki_data:
+  promtail_data:
+  alertmanager_data:
+  grafana_data:
+
+networks:
+  fintech:
+    driver: bridge

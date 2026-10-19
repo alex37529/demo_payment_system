@@ -1,0 +1,37 @@
+{
+  "title": "payments-overview",
+  "uid": "payments-overview",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "RPS (gateway)",
+      "datasource": { "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(http_request_duration_seconds_count{service=\"gateway\"}[1m]))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P99 latency (s)",
+      "datasource": { "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{}[3m])) by (le))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Fraud CB state (1=open)",
+      "datasource": { "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "targets": [ { "expr": "pybreaker_open{service=\"orchestrator\"}", "refId": "A" } ]
+    }
+  ]
+}

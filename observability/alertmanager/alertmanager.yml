@@ -1,0 +1,14 @@
+# Alertmanager — minimal routing (no notifier targets in Phase 1).
+# Valid top-level keys: global, route, receivers, inhibit_rules.
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname"]
+  receiver: "null"
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+
+receivers:
+  - name: "null"

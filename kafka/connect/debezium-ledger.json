@@ -1,0 +1,27 @@
+{
+  "name": "ledger-outbox",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "fintech",
+    "database.password": "fintech",
+    "database.dbname": "ledger",
+    "schema.include.list": "public",
+    "table.include.list": "public.outbox_events",
+    "publication.name": "outbox_publication",
+    "plugin.name": "pgoutput",
+    "decoding.plugin.name": "pgoutput",
+    "topic.prefix": "outbox",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "key.converter.schemas.enable": "false",
+    "transforms": "Route,Extract",
+    "transforms.Route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.Route.regex": "^outbox\\.public\\.outbox_events$",
+    "transforms.Route.replacement": "ledger.events",
+    "transforms.Extract.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.Extract.add_schema_comment_header": "false"
+  }
+}

@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/rules/rules.yml
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The 8 placeholder services (compose service names).
+  - job_name: "services"
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "gateway:8080"
+          - "intake:8080"
+          - "orchestrator:8080"
+          - "ledger:8080"
+          - "profile:8080"
+          - "notification:8080"
+          - "mock-acquirer:8080"
+          - "mock-fraud:8080"
