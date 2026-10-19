@@ -5,9 +5,9 @@ requires `from shared.domain import Aggregate`).
 """
 from .base import AggregateRoot, Entity, ValueObject
 from .events import (
-    DomainEvent,
     CancelReservationPosted,
     DebitFailed,
+    DomainEvent,
     FraudVerdict,
     FundsDebited,
     FundsReserved,
@@ -23,17 +23,17 @@ Aggregate = AggregateRoot  # backward-compat alias
 __all__ = [
     "Aggregate",
     "AggregateRoot",
-    "Entity",
-    "ValueObject",
-    "DomainEvent",
-    "PaymentCreated",
-    "LimitsChecked",
-    "FraudVerdict",
-    "DebitFailed",
-    "FundsReserved",
-    "FundsDebited",
     "CancelReservationPosted",
+    "DebitFailed",
+    "DomainEvent",
+    "Entity",
+    "FraudVerdict",
+    "FundsDebited",
+    "FundsReserved",
+    "LimitsChecked",
+    "PaymentCreated",
     "RefundPosted",
     "SagaFailed",
     "SagaSucceeded",
+    "ValueObject",
 ]

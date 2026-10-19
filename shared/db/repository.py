@@ -6,7 +6,7 @@ These are abstract contracts; concrete impls live in each service's
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Protocol
+from typing import Any
 
 
 class IAccountRepository(ABC):

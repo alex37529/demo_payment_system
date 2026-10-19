@@ -1,6 +1,6 @@
 name: fintech_demo
 
-# Phase 1 (01_environment_abstractions) — data + CDC + observability stack.
+# fintech_demo — data + CDC + observability stack + 8 app services.
 # Port map: doc/tz_v2.md §4.1.
 #
 # CONTAINER NAMING: fintech_ prefix; our services -> <name>_service; infra -> clean base name.
@@ -215,6 +215,108 @@ services:
       - grafana_data:/var/lib/grafana
     ports:
       - "3000:3000"
+    networks: [fintech]
+
+  # ---------------------- our 8 app services (shared Dockerfile, SERVICE_NAME) ----------------------
+  # Each = same image (build once), different SERVICE_NAME + host port. See doc/tz_v2.md §4.1 for the
+  # fixed port map. DSNs point at `postgres` service (4 bases in one container).
+  gateway:
+    build: { context: ., args: { SERVICE_NAME: gateway } }
+    container_name: fintech_gateway_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      KAFKA_BROKERS: "kafka:9092"
+      LEDGER_ENABLE_CONSUMER: "0"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    ports: ["8000:8080"]
+    networks: [fintech]
+
+  intake:
+    build: { context: ., args: { SERVICE_NAME: intake } }
+    container_name: fintech_intake_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      KAFKA_BROKERS: "kafka:9092"
+      INTAKE_DSN: "postgresql+asyncpg://fintech:fintech@postgres:5432/intake"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    ports: ["8001:8080"]
+    networks: [fintech]
+
+  orchestrator:
+    build: { context: ., args: { SERVICE_NAME: orchestrator } }
+    container_name: fintech_orchestrator_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      KAFKA_BROKERS: "kafka:9092"
+      ORCHESTRATOR_DSN: "postgresql+asyncpg://fintech:fintech@postgres:5432/orchestrator"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    ports: ["8002:8080"]
+    networks: [fintech]
+
+  ledger:
+    build: { context: ., args: { SERVICE_NAME: ledger } }
+    container_name: fintech_ledger_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      KAFKA_BROKERS: "kafka:9092"
+      LEDGER_DSN: "postgresql+asyncpg://fintech:fintech@postgres:5432/ledger"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      kafka-topics: { condition: service_completed_successfully }
+    ports: ["8003:8080"]
+    networks: [fintech]
+
+  profile:
+    build: { context: ., args: { SERVICE_NAME: profile } }
+    container_name: fintech_profile_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      KAFKA_BROKERS: "kafka:9092"
+      PROFILE_DSN: "postgresql+asyncpg://fintech:fintech@postgres:5432/profile"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    ports: ["8004:8080"]
+    networks: [fintech]
+
+  notification:
+    build: { context: ., args: { SERVICE_NAME: notification } }
+    container_name: fintech_notification_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      KAFKA_BROKERS: "kafka:9092"
+    depends_on:
+      kafka: { condition: service_healthy }
+    ports: ["8005:8080"]
+    networks: [fintech]
+
+  mock-acquirer:
+    build: { context: ., args: { SERVICE_NAME: mock-acquirer } }
+    container_name: fintech_mock_acquirer_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["8006:8080"]
+    networks: [fintech]
+
+  mock-fraud:
+    build: { context: ., args: { SERVICE_NAME: mock-fraud } }
+    container_name: fintech_mock_fraud_service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["8007:8080"]
     networks: [fintech]
 
 volumes:

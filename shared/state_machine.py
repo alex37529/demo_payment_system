@@ -44,7 +44,7 @@ class PaymentStateMachine(StateMachine):
 
     @classmethod
     def restore(cls, state: str, *, has_debit_ok: bool = False,
-                has_error: bool = False, reservation_made: bool = False) -> "PaymentStateMachine":
+                has_error: bool = False, reservation_made: bool = False) -> PaymentStateMachine:
         """Rebuild from a persisted state string (Orchestrator, phase 3)."""
         value = {"Created": "created", "Validating": "validating", "Processing": "processing",
                  "Success": "success", "Failed": "failed", "RolledBack": "rolledback"}.get(state, "created")

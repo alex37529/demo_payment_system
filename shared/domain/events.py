@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
 class DomainEvent:
     event_id: uuid.UUID = field(default_factory=uuid.uuid4)
-    ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    ts: datetime = field(default_factory=lambda: datetime.now(UTC))
     occurred_by: str = ""
 
     def to_json(self) -> dict:
@@ -117,14 +117,14 @@ class SagaSucceeded(DomainEvent):
 
 
 __all__ = [
-    "DomainEvent",
-    "PaymentCreated",
-    "LimitsChecked",
-    "FraudVerdict",
-    "DebitFailed",
-    "FundsReserved",
-    "FundsDebited",
     "CancelReservationPosted",
+    "DebitFailed",
+    "DomainEvent",
+    "FraudVerdict",
+    "FundsDebited",
+    "FundsReserved",
+    "LimitsChecked",
+    "PaymentCreated",
     "RefundPosted",
     "SagaFailed",
     "SagaSucceeded",
