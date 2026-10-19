@@ -1,0 +1,127 @@
+name: fintech_demo
+
+# Phase 1 (01_environment_abstractions) — core data stack.
+# Port map: doc/tz_v2.md §4.1.
+#
+# CONTAINER NAMING: fintech_ prefix; our services -> <name>_service; infra -> clean base name.
+# Compose SERVICE KEYS keep short names (DNS discovery); container_name sets the docker ps name.
+services:
+  # ---------------------- data stack ----------------------
+  postgres:
+    image: postgres:16
+    container_name: fintech_postgres
+    command: >
+      postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_size=2GB
+    environment:
+      POSTGRES_PASSWORD: fintech
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init/01_databases.sql:/docker-entrypoint-initdb.d/01.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintech || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [fintech]
+
+  redis:
+    image: redis:7-alpine
+    container_name: fintech_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks: [fintech]
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: fintech_kafka
+    environment:
+      KAFKA_NODE_ID: "0"
+      KAFKA_PROCESS_ROLES: "controller,broker"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      retries: 30
+      start_period: 30s
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+      - ./kafka/topics.sh:/opt/kafka/bin/fintech-topics.sh:ro
+    networks: [fintech]
+
+  # Our one-shot helper: creates the 6 topics once kafka is healthy (idempotent).
+  kafka-topics:
+    image: apache/kafka:3.7.0
+    container_name: fintech_kafka_topics_init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_NODE_ID: "0"
+      KAFKA_PROCESS_ROLES: "controller,broker"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+    command: ["/opt/kafka/bin/fintech-topics.sh"]
+    volumes:
+      - ./kafka/topics.sh:/opt/kafka/bin/fintech-topics.sh:ro
+    networks: [fintech]
+
+  kafka-connect:
+    image: debezium/connect:2.5
+    container_name: fintech_kafka_connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-topics:
+        condition: service_completed_successfully
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "fintech-connect"
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: "/kafka/connect"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [fintech]
+
+volumes:
+  pgdata:
+  kafka_data:
+
+networks:
+  fintech:
+    driver: bridge
