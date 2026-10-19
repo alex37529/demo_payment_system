@@ -19,7 +19,13 @@ class DomainEvent:
     occurred_by: str = ""
 
     def to_json(self) -> dict:
-        out: dict = {}
+        out: dict = {
+            # Self-describing discriminator: lets consumers (e.g. the Orchestrator)
+            # key off `event_type` in `ledger.events` / `payments.events` without
+            # inferring from which fields are present (the event classes share
+            # nearly identical field shapes). Backwards-compatible: purely additive.
+            "event_type": type(self).__name__,
+        }
         for k, v in self.__dict__.items():
             if hasattr(v, "isoformat"):
                 out[k] = v.isoformat()

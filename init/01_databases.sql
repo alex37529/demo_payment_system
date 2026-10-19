@@ -85,4 +85,23 @@ ALTER TABLE accounts         OWNER TO fintech;
 ALTER TABLE applied_commands OWNER TO fintech;
 ALTER TABLE payments         OWNER TO fintech;
 
+-- Phase 3 — saga state (the `orchestrator` bounded context owns this table; the
+-- ledger DB above stays write-side only). State is the saga state name;
+-- `history`/`payload`/`compensation` are JSON (SQLAlchemy writes via `JSON`).
+\connect orchestrator
+CREATE TABLE IF NOT EXISTS sagas (
+    saga_id      VARCHAR(64)  PRIMARY KEY,
+    payment_id   VARCHAR(64)  NOT NULL UNIQUE,
+    state        VARCHAR(32)  NOT NULL DEFAULT 'Created',
+    history      JSON         NOT NULL DEFAULT '[]',
+    payload      JSON         NOT NULL DEFAULT '{}',
+    compensation JSON         NOT NULL DEFAULT '[]',
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_sagas_payment ON sagas (payment_id);
+CREATE INDEX IF NOT EXISTS idx_sagas_state   ON sagas (state);
+ALTER TABLE sagas OWNER TO fintech;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO fintech;
+
 -- wal_level=logical is set via the container `command` (postgres -c wal_level=logical).
