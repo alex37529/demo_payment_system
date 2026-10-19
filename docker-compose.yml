@@ -1,6 +1,6 @@
 name: fintech_demo
 
-# Phase 1 (01_environment_abstractions) — core data stack.
+# Phase 1 (01_environment_abstractions) — data stack + Debezium CDC.
 # Port map: doc/tz_v2.md §4.1.
 #
 # CONTAINER NAMING: fintech_ prefix; our services -> <name>_service; infra -> clean base name.
@@ -117,6 +117,27 @@ services:
       retries: 30
       start_period: 20s
     networks: [fintech]
+
+  # Our one-shot helper: registers the Debezium ledger-outbox connector (stdlib).
+  debezium:
+    image: python:3.11-slim
+    container_name: fintech_debezium_register
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    environment:
+      CONNECT_URL: "http://kafka-connect:8083"
+    volumes:
+      - ./kafka/connect:/app/config:ro
+      - ./scripts/register_connector.py:/app/register.py:ro
+    entrypoint: ["python", "/app/register.py"]
+    networks: [fintech]
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 1
 
 volumes:
   pgdata:
