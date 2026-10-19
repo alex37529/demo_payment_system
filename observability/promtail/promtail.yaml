@@ -1,0 +1,25 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  filename: /promtail/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # One promtail reads every container's docker-json log file (+1 container,
+  # not +8 sidecars). The `docker` stage unwraps {"log":...,"stream":...,"time":...}
+  # so Loki stores the inner log line. Per-service JSON fields (service/path/
+  # trace_id) are structured in the line itself; parsing them into Loki labels
+  # is a phase-7 nicety (see 07_observability_tests.md).
+  - job_name: docker
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      - docker: {}

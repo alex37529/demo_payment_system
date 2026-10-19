@@ -1,6 +1,6 @@
 name: fintech_demo
 
-# Phase 1 (01_environment_abstractions) — data stack + Debezium CDC.
+# Phase 1 (01_environment_abstractions) — data + CDC + observability stack.
 # Port map: doc/tz_v2.md §4.1.
 #
 # CONTAINER NAMING: fintech_ prefix; our services -> <name>_service; infra -> clean base name.
@@ -139,9 +139,93 @@ services:
       timeout: 5s
       retries: 1
 
+  # ---------------------- observability (third-party) ----------------------
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: fintech_prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules.yml:/etc/prometheus/rules/rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [fintech]
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: fintech_tempo
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./observability/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+    networks: [fintech]
+
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: fintech_loki
+    command: ["-config.file=/etc/loki/loki.conf"]
+    volumes:
+      - ./observability/loki/loki.conf:/etc/loki/loki.conf:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks: [fintech]
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    container_name: fintech_promtail
+    command: ["-config.file=/etc/promtail/promtail.yaml"]
+    volumes:
+      - ./observability/promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - promtail_data:/promtail
+    networks: [fintech]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: fintech_alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks: [fintech]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: fintech_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks: [fintech]
+
 volumes:
   pgdata:
   kafka_data:
+  prometheus_data:
+  tempo_data:
+  loki_data:
+  promtail_data:
+  alertmanager_data:
+  grafana_data:
 
 networks:
   fintech:

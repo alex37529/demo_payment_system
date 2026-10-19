@@ -1,0 +1,23 @@
+groups:
+  - name: fintech_payments
+    rules:
+      - alert: HighP99Latency
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[3m])) by (le)) > 0.5
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: "P99 latency > 500ms for 3m"
+
+      - alert: CircuitBreakerOpen
+        expr: pybreaker_open == 1
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Circuit breaker (Fraud) is OPEN"
+
+      - alert: DLQDepth
+        expr: kafka_log_end_offset{kafka_topic=~".*\\.dlq"} > 10
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "DLQ depth > 10"
