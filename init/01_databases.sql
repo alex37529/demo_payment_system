@@ -12,14 +12,26 @@ CREATE DATABASE profile OWNER fintech;
 -- reads this table's inserts (WAL) and publishes to Kafka (topic `ledger.events`).
 \connect ledger
 CREATE TABLE IF NOT EXISTS outbox_events (
-    id         BIGSERIAL PRIMARY KEY,
-    event_id   VARCHAR(36) NOT NULL UNIQUE,
-    topic      VARCHAR(128) NOT NULL,
-    payload    JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id           BIGSERIAL PRIMARY KEY,
+    event_id     VARCHAR(36) NOT NULL UNIQUE,
+    topic        VARCHAR(128) NOT NULL,
+    payload      JSONB NOT NULL,
+    status       VARCHAR(32) NOT NULL DEFAULT 'pending',
+    published_at TIMESTAMPTZ,
+    last_error   VARCHAR(512),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_topic ON outbox_events (topic);
+CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events (status);
 CREATE INDEX IF NOT EXISTS idx_outbox_created_at ON outbox_events (created_at);
+
+-- Upgrade already-provisioned volumes (created before status tracking existed).
+-- ADD COLUMN IF NOT EXISTS is a no-op when the column is already present.
+ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS status       VARCHAR(32) NOT NULL DEFAULT 'pending';
+ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS last_error   VARCHAR(512);
+ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS updated_at   TIMESTAMPTZ NOT NULL DEFAULT now();
 
 -- Hand ownership to the app role so the Ledger service can write (and Debezium
 -- can read). The init script runs as the `postgres` superuser.
