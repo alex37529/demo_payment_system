@@ -1,0 +1,257 @@
+"""Ledger HTTP command API (manual-test surface; main path is `ledger.commands`).
+
+Endpoints (port 8003):
+  POST /v1/accounts/{account_id}/debit
+  POST /v1/accounts/{account_id}/reserve
+  POST /v1/accounts/{account_id}/refund
+  POST /v1/accounts/{account_id}/cancel-reservation
+  GET  /v1/accounts/{account_id}
+  GET  /v1/accounts
+
+Both the HTTP API and the Kafka consumer funnel into the SAME use-cases
+(single source of truth — phase-2 spec §8, pitfall #10).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+from starlette.responses import JSONResponse
+
+from services.ledger.application import (
+    LedgerUseCaseRunner,
+    UseCase_CancelReservation,
+    UseCase_Debit,
+    UseCase_Refund,
+    UseCase_Reserve,
+)
+from services.ledger.domain import (
+    Account,
+    AccountNotFound,
+    InsufficientFundsError,
+    LedgerError,
+    Money,
+)
+from services.ledger.infrastructure.models import AccountRow
+from services.ledger.infrastructure.repository import SQLAlchemyAccountRepository
+
+log = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# DTOs
+# --------------------------------------------------------------------------- #
+class MoneyIn(BaseModel):
+    """``{"value":100,"currency":"USD"}`` or ``{"amount":100,"currency":"USD"}``."""
+
+    value: int | None = None
+    amount: int | None = None
+    currency: str = "USD"
+
+    def to_money(self) -> Money:
+        amt = self.value if self.value is not None else self.amount
+        if amt is None:
+            raise ValueError("money requires `value` or `amount` (int, minor units)")
+        return Money(int(amt), self.currency.upper())
+
+
+class LedgerCommandIn(BaseModel):
+    """Body for debit / reserve / refund / cancel-reservation."""
+
+    payment_id: str = ""
+    saga_id: str = ""
+    reason: str = ""
+    amount: int | MoneyIn | None = None
+    currency: str = "USD"
+    value: int | None = None  # shorthand: bare amount + separate currency field
+
+    def to_money(self) -> Money:
+        if isinstance(self.amount, MoneyIn):
+            return self.amount.to_money()
+        if isinstance(self.amount, int):
+            return Money(self.amount, self.currency.upper())
+        if self.value is not None:
+            return Money(self.value, self.currency.upper())
+        raise ValueError("`amount` (or `value`) is required")
+
+
+class CommandOut(BaseModel):
+    ok: bool = True
+    payment_id: str = ""
+    account_id: str = ""
+    amount: dict = {}
+    applied: bool = True
+    event_type: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Bootstrap (engine / session factory / repo / runner / consumer)
+# --------------------------------------------------------------------------- #
+def _dsn() -> str:
+    dsn = os.environ.get("LEDGER_DSN") or os.environ.get("DATABASE_URL", "")
+    for p in ("postgresql://", "postgres://"):
+        if dsn.startswith(p):
+            dsn = dsn.replace(p, "postgresql+asyncpg://", 1)
+            break
+    if not dsn:  # default for compose (postgres service, role fintech)
+        dsn = "postgresql+asyncpg://fintech:fintech@postgres:5432/ledger"
+    return dsn
+
+
+def _engine_for(dsn: str):
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from shared.db.base import make_engine
+
+    if dsn.startswith("sqlite"):
+        # sqlite (tests): keep a single shared connection for :memory: DBs
+        from sqlalchemy.pool import StaticPool
+
+        return create_async_engine(dsn, poolclass=StaticPool)
+    return make_engine(dsn)
+
+
+def _consumer_enabled() -> bool:
+    return os.environ.get("LEDGER_ENABLE_CONSUMER", "1") not in ("0", "false", "False")
+
+
+def attach_ledger(app: FastAPI) -> None:
+    """Wire the ledger service onto an existing FastAPI app (shared.observability)."""
+    from contextlib import asynccontextmanager
+
+    dsn = _dsn()
+    engine = _engine_for(dsn)
+    from shared.db.base import Base, make_session_factory
+
+    sf = make_session_factory(engine)
+    runner = LedgerUseCaseRunner(session_factory=sf, repo=SQLAlchemyAccountRepository())
+    app.state.ledger_runner = runner
+    app.state.ledger_engine = engine
+
+    register_exception_handlers(app)
+    register_routes(app)
+
+    @asynccontextmanager
+    async def _ledger_lifespan(_app):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        task = None
+        if _consumer_enabled():
+            from services.ledger import kafka_consumer
+
+            brokers = os.environ.get("KAFKA_BROKERS", "kafka:9092")
+            task = asyncio.create_task(
+                kafka_consumer.run_consumer(brokers=brokers, runner=runner),
+                name="ledger-commands")
+            app.state.ledger_consumer_task = task
+        log.info("ledger ready (dsn=%s, consumer=%s)", dsn.split("@")[-1],
+                 _consumer_enabled())
+        try:
+            yield
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+            await engine.dispose()
+            log.info("ledger engine disposed")
+
+    # Starlette (1.0+) uses a single `lifespan` callable, invoked once on
+    # app start. Replace any prior handler so calling attach_ledger() twice
+    # is safe, and so we can still run it manually in tests (via `start()`).
+    app.router.lifespan_context = _ledger_lifespan
+
+
+async def start(app: FastAPI) -> None:
+    """Manually trigger the startup portion (used by the API tests)."""
+    # Grab the lifespan context manager from the app and invoke its __aenter__.
+    lf = app.router.lifespan_context
+    cm = lf(app)
+    try:
+        await cm.__aenter__()
+    except Exception:
+        await cm.__aexit__(None, None, None)
+        raise
+    # stash so `stop()` can close the same context
+    app.state.ledger_lf_cm = cm
+
+
+async def stop(app: FastAPI) -> None:
+    cm = getattr(app.state, "ledger_lf_cm", None)
+    if cm is not None:
+        await cm.__aexit__(None, None, None)
+
+
+# --------------------------------------------------------------------------- #
+# Routes
+# --------------------------------------------------------------------------- #
+async def _run_command(app: FastAPI, uc_cls, account_id: str, body: LedgerCommandIn) -> CommandOut:
+    try:
+        amount = body.to_money()
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    runner = app.state.ledger_runner
+    uc = uc_cls(session_factory=runner.session_factory, repo=runner.repo)
+    res = await uc.execute(account_id=account_id, amount=amount,
+                           payment_id=body.payment_id, reason=body.reason)
+    return CommandOut(
+        payment_id=res.get("payment_id", body.payment_id),
+        account_id=account_id,
+        amount=res.get("amount", amount.to_dict()),
+        applied=res.get("applied", True),
+        event_type=res.get("event_type", ""),
+    )
+
+
+def register_routes(app: FastAPI) -> None:
+    @app.post("/v1/accounts/{account_id}/debit", response_model=CommandOut)
+    async def debit(account_id: str, body: LedgerCommandIn):
+        return await _run_command(app, UseCase_Debit, account_id, body)
+
+    @app.post("/v1/accounts/{account_id}/reserve", response_model=CommandOut)
+    async def reserve(account_id: str, body: LedgerCommandIn):
+        return await _run_command(app, UseCase_Reserve, account_id, body)
+
+    @app.post("/v1/accounts/{account_id}/refund", response_model=CommandOut)
+    async def refund(account_id: str, body: LedgerCommandIn):
+        return await _run_command(app, UseCase_Refund, account_id, body)
+
+    @app.post("/v1/accounts/{account_id}/cancel-reservation", response_model=CommandOut)
+    async def cancel_reservation(account_id: str, body: LedgerCommandIn):
+        return await _run_command(app, UseCase_CancelReservation, account_id, body)
+
+    @app.get("/v1/accounts/{account_id}")
+    async def get_account(account_id: str):
+        sf = app.state.ledger_runner.session_factory
+        async with sf() as s:
+            row = await s.get(AccountRow, account_id)
+            if row is None:
+                raise AccountNotFound(account_id)
+            agg = Account.load(row)
+            return {
+                "id": agg.account_id, "owner_name": agg.owner_name, "currency": agg.currency,
+                "balance": agg.balance.to_dict(), "reserved": agg.reserved.to_dict(),
+                "available": agg.available.to_dict(),
+            }
+
+
+# --------------------------------------------------------------------------- #
+# Error handlers (domain -> HTTP)
+# --------------------------------------------------------------------------- #
+def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(AccountNotFound)
+    async def _not_found(_: Request, exc: AccountNotFound) -> JSONResponse:
+        return JSONResponse(status_code=404,
+                            content={"ok": False, "error": "AccountNotFound", "detail": str(exc)})
+
+    @app.exception_handler(InsufficientFundsError)
+    async def _insufficient(_: Request, exc: InsufficientFundsError) -> JSONResponse:
+        return JSONResponse(status_code=409,
+                            content={"ok": False, "error": "InsufficientFundsError", "detail": str(exc)})
+
+    @app.exception_handler(LedgerError)
+    async def _ledger_error(_: Request, exc: LedgerError) -> JSONResponse:
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": type(exc).__name__, "detail": str(exc)})

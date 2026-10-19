@@ -10,10 +10,10 @@ publish after commit (an event could be lost on a crash in between).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, JSON, String
+from sqlalchemy import JSON, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shared.db.base import Base
@@ -22,12 +22,12 @@ from shared.db.base import Base
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
     topic: Mapped[str] = mapped_column(String(128), index=True)  # ledger.events / payments.events
     payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
     )
 
     def __init__(self, event: Any, topic: str) -> None:

@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
