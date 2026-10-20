@@ -17,6 +17,7 @@ from typing import Any
 from services.notification.ring import PaymentLog
 from services.notification.sse import SSERelay, shape_hint
 from shared.kafka import KafkaConsumer, unwrap_event
+from shared.tracing import start_consumer_span
 
 log = logging.getLogger(__name__)
 
@@ -55,11 +56,16 @@ async def run_consumer(
     await consumer.start()
     try:
         async for key, raw in consumer.stream():
-            event = unwrap_event(raw)
-            payment = to_payment(event)
-            plog.push(payment)
-            relay.broadcast(payment)  # non-blocking fan-out to N subscribers
-            log.info("notification: feed %s (len=%d, subs=%d)",
-                     payment.get("payment_id") or key, len(plog), relay.subscriber_count)
+            # Consumer span, parented to the producer's span via the W3C
+            # traceparent carried in the Kafka headers (phase-7 §2.2).
+            with start_consumer_span(
+                f"consume {TOPIC}", consumer.last_headers, topic=TOPIC, group=GROUP
+            ):
+                event = unwrap_event(raw)
+                payment = to_payment(event)
+                plog.push(payment)
+                relay.broadcast(payment)  # non-blocking fan-out to N subscribers
+                log.info("notification: feed %s (len=%d, subs=%d)",
+                         payment.get("payment_id") or key, len(plog), relay.subscriber_count)
     finally:
         await consumer.stop()

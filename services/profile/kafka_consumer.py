@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from services.profile.infrastructure import ProfileRepo
 from services.profile.projection import resolve_new_balance
 from shared.kafka import KafkaConsumer, unwrap_event
+from shared.tracing import start_consumer_span
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,12 @@ async def run_consumer(*, brokers: str, repo: ProfileRepo) -> None:
     await consumer.start()
     try:
         async for key, raw in consumer.stream():
-            await process_record(raw, key, repo)
+            # Consumer span, parented to the producer's span via the W3C
+            # traceparent carried in the Kafka headers (phase-7 §2.2).
+            with start_consumer_span(
+                f"consume {TOPIC}", consumer.last_headers, topic=TOPIC, group=GROUP
+            ):
+                await process_record(raw, key, repo)
     finally:
         await consumer.stop()
 

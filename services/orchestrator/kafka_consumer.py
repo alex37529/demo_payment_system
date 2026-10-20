@@ -31,6 +31,7 @@ from services.orchestrator.application import (
     SagaHandler,
 )
 from shared.kafka import KafkaConsumer
+from shared.tracing import start_consumer_span
 
 log = logging.getLogger(__name__)
 
@@ -109,10 +110,18 @@ async def run_consumers(
         log.info("orchestrator: consumer loop 1 up (%s)", TOPIC_PAYMENTS_COMMANDS)
         try:
             async for key, payload in c_cmd.stream():
-                try:
-                    await handler.on_create(key, payload)
-                except Exception:
-                    log.exception("on_create failed key=%s", key)
+                # Consumer span, parented to the producer's span via the W3C
+                # traceparent carried in the Kafka headers (phase-7 §2.2).
+                with start_consumer_span(
+                    f"consume {TOPIC_PAYMENTS_COMMANDS}",
+                    c_cmd.last_headers,
+                    topic=TOPIC_PAYMENTS_COMMANDS,
+                    group=CMD_GROUP,
+                ):
+                    try:
+                        await handler.on_create(key, payload)
+                    except Exception:
+                        log.exception("on_create failed key=%s", key)
         finally:
             await c_cmd.stop()
 
@@ -120,20 +129,26 @@ async def run_consumers(
         log.info("orchestrator: consumer loop 2 up (%s)", TOPIC_LEDGER_EVENTS)
         try:
             async for key, raw in c_evt.stream():
-                payload = _unwrap(raw)               # Debezium record -> inner event
-                etype = _event_type(payload)
-                if etype is None:
-                    log.warning("ledger.events with no recognisable event: %s", raw)
-                    continue
-                method_name = EVENT_DISPATCH.get(etype)
-                if method_name is None:
-                    log.info("ignoring %s for payment %s", etype, payload.get("payment_id"))
-                    continue
-                method = getattr(handler, method_name)
-                try:
-                    await method(key, payload)
-                except Exception:
-                    log.exception("%s failed key=%s etype=%s", method_name, key, etype)
+                with start_consumer_span(
+                    f"consume {TOPIC_LEDGER_EVENTS}",
+                    c_evt.last_headers,
+                    topic=TOPIC_LEDGER_EVENTS,
+                    group=EVT_GROUP,
+                ):
+                    payload = _unwrap(raw)               # Debezium record -> inner event
+                    etype = _event_type(payload)
+                    if etype is None:
+                        log.warning("ledger.events with no recognisable event: %s", raw)
+                        continue
+                    method_name = EVENT_DISPATCH.get(etype)
+                    if method_name is None:
+                        log.info("ignoring %s for payment %s", etype, payload.get("payment_id"))
+                        continue
+                    method = getattr(handler, method_name)
+                    try:
+                        await method(key, payload)
+                    except Exception:
+                        log.exception("%s failed key=%s etype=%s", method_name, key, etype)
         finally:
             await c_evt.stop()
 
