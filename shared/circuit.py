@@ -19,7 +19,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from aiobreaker import CircuitBreaker, CircuitBreakerError
+from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
+
+from shared.metrics import set_breaker_state
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +30,28 @@ Fallback = Callable[[str, dict], Awaitable[Any]]
 
 class _BreakerHttpError(Exception):
     """Wraps non-2xx HTTP responses so aiobreaker counts them as failures."""
+
+
+class _StateGaugeListener(CircuitBreakerListener):
+    """Mirror the breaker state into the ``pybreaker_open`` Prometheus gauge.
+
+    aiobreaker exposes no metrics of its own (phase-7 spec §3.2, pitfall #4):
+    the state has to be published by a listener. The gauge is
+    ``pybreaker_open{owner=..., protected=...}`` — 1 = OPEN, 0 = closed — and
+    the alert rule ``pybreaker_open == 1`` fires on it.
+    """
+
+    def __init__(self, owner: str, protected: str) -> None:
+        self._owner = owner
+        self._protected = protected
+
+    def state_change(self, breaker, old, new) -> None:
+        # `new` is the aiobreaker state object; its `state` attribute is the
+        # CircuitBreakerState enum member.
+        name = getattr(getattr(new, "state", new), "name", str(new))
+        is_open = name.upper() == "OPEN"
+        set_breaker_state(is_open, owner=self._owner, protected=self._protected)
+        log.info("circuit breaker state -> %s", name)
 
 
 class CircuitBreakerHttpClient:
@@ -40,11 +64,19 @@ class CircuitBreakerHttpClient:
         fail_max: int = 5,
         reset_timeout: float = 30.0,  # seconds until half-open probe
         timeout: float = 3.0,  # httpx per-request timeout (MUST be < fraud-fail injection 5s)
+        owner: str = "",
+        protected: str = "",
     ) -> None:
         self.cb = CircuitBreaker(
             fail_max=fail_max,
             timeout_duration=datetime.timedelta(seconds=reset_timeout),
         )
+        if owner and protected:
+            # Publish the current (closed) state immediately so the gauge
+            # exists before the first transition — a dashboard panel that only
+            # appears after the first failure is useless.
+            set_breaker_state(False, owner=owner, protected=protected)
+            self.cb.add_listener(_StateGaugeListener(owner, protected))
         self.client = httpx.AsyncClient(timeout=timeout)
         self.fallback = fallback
 

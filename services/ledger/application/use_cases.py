@@ -31,6 +31,7 @@ from shared.domain.events import (
     FundsReserved,
     RefundPosted,
 )
+from shared.metrics import inc_processed
 from shared.outbox import OutboxMixin
 
 TOPIC_LEDGER_EVENTS = "ledger.events"
@@ -92,6 +93,11 @@ class _AccountUseCase(OutboxMixin):
             self._record_journal(session, event, balance_after=agg.balance.amount,
                                  outbox_row=outbox_row, payment_id=payment_id)
             await session.commit()
+            # Prometheus: the money actually moved (phase-7 spec §3.1).
+            # Counted only for balance-moving ops — a reservation does not
+            # settle a payment.
+            if type(event).__name__ in self.JOURNALABLE:
+                inc_processed("ledger")
         except (InsufficientFundsError, AccountNotFound):
             await session.rollback()
             raise

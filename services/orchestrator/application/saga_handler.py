@@ -34,6 +34,7 @@ from shared.domain.events import (
     SagaFailed,
     SagaSucceeded,
 )
+from shared.metrics import inc_dlq, inc_failed, inc_processed
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,31 @@ TOPIC_DLQ = "ledger.commands.dlq"
 
 #: saga states that are terminal & final
 TERMINAL_STATES = frozenset({"Success", "Failed", "RolledBack"})
+
+
+def _failure_reason(failed_step: str, reason: str) -> str:
+    """Map a free-form failure reason to a STABLE, low-cardinality label.
+
+    A Prometheus label must not carry a free-text reason (unbounded
+    cardinality — one series per distinct message). We bucket by the saga step
+    and the few known reasons; everything else collapses to ``other``.
+    """
+    text = (reason or "").lower()
+    if "circuit" in text or "circuit_open" in text:
+        return "cb_open"
+    if "decline" in text:
+        return "fraud_decline"
+    if "insufficient" in text:
+        return "insufficient_funds"
+    if "timeout" in text:
+        return "timeout"
+    if failed_step == "fraud":
+        return "fraud_decline"
+    if failed_step == "debit":
+        return "insufficient_funds"
+    if failed_step == "limits":
+        return "limits"
+    return "other"
 
 
 class LedgerPublisher(Protocol):
@@ -133,6 +159,8 @@ class SagaHandler:
         saga.state = "Success"
         await self.repo.save(saga)
         await self._emit(SagaSucceeded(payment_id=saga.payment_id, saga_id=saga.saga_id))
+        # Prometheus: the payment completed end-to-end (phase-7 spec §3.1).
+        inc_processed("orchestrator")
         log.info("saga %s: SUCCESS (payment %s)", saga.saga_id, payment_id)
 
     async def on_compensation_applied(self, key: str, payload: dict, *, event_type: str) -> None:
@@ -209,6 +237,10 @@ class SagaHandler:
         saga.mark_step(failed_step, cmd=failed_step.capitalize(), event="failure", ok=False, err=reason)
         await self.repo.save(saga)
 
+        # Prometheus: every failure path converges here, so this is the one
+        # place that counts failures (phase-7 spec §3.1 `payments_failed_total`).
+        inc_failed(_failure_reason(failed_step, reason))
+
         if compensation:  # reverse the booked reservation (newest first)
             for cmd in compensation:
                 await self._send_command(saga, cmd, reason=reason)
@@ -243,6 +275,10 @@ class SagaHandler:
 
     async def _publish_raw(self, topic: str, value: dict) -> None:
         key = value.get("payment_id", "")
+        if topic.endswith(".dlq"):
+            # Prometheus: a message we deliberately routed to the DLQ
+            # (phase-7 spec §3.1 `dlq_messages_total`).
+            inc_dlq(topic)
         try:
             await self.pub.publish(topic, key, value)
         except Exception:  # noqa: BLE001 — producer already routed to its own DLQ

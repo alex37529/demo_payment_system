@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from shared.circuit import CircuitBreakerHttpClient
+from shared.metrics import CB_OWNER, CB_PROTECTED
 
 log = logging.getLogger(__name__)
 
@@ -44,13 +45,17 @@ def make_fraud_client(
     reset_timeout: float = 10.0,
     timeout: float = 2.5,
 ) -> tuple[CircuitBreakerHttpClient, str]:
-    """Return ``(client, check_url)``. `base_url` defaults to the mock-fraud service."""
+    """Return ``(client, check_url)`. `base_url` defaults to the mock-fraud service."""
     base = (base_url or "http://mock-fraud:8080").rstrip("/")
     client = CircuitBreakerHttpClient(
         fallback=_fraud_fallback,
         fail_max=fail_max,
         reset_timeout=reset_timeout,
         timeout=timeout,
+        # Prometheus labels for the breaker gauge: `owner` = the service that
+        # HOLDS the breaker, `protected` = the dependency it guards.
+        owner=CB_OWNER,
+        protected=CB_PROTECTED,
     )
     return client, f"{base}/fraud/check"
 
