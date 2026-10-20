@@ -70,7 +70,9 @@ def _failure_reason(failed_step: str, reason: str) -> str:
         return "cb_open"
     if "decline" in text or "high_amount" in text:
         return "fraud_decline"
-    if "insufficient" in text:
+    # The ledger's rejection text: "reserve 60183 exceeds available 40939
+    # (reserved 0)" — it never says the word "insufficient".
+    if "insufficient" in text or "exceeds available" in text or "exceeds spendable" in text:
         return "insufficient_funds"
     if "timeout" in text:
         return "timeout"
@@ -187,14 +189,22 @@ class SagaHandler:
         log.info("saga %s: compensation %s applied", saga.saga_id, event_type)
 
     async def on_debit_failed(self, key: str, payload: dict) -> None:
-        """Ledger rejected a Debit (business error) — compensate + RolledBack."""
+        """The ledger REFUSED a command — compensate and end the saga.
+
+        The event carries the `step` that failed (`reserve`, `debit`, …), so
+        the compensation is derived from where the saga actually died
+        instead of assuming "debit". Before ADR-010 the ledger answered a
+        rejection with silence, so the saga only learned about it from the
+        watchdog — 30 seconds later, and indistinguishable from a stall.
+        """
         payment_id = str(payload.get("payment_id") or key)
         row = await self.repo.get_by_payment(payment_id)
         if row is None or row.state in TERMINAL_STATES:
             return
         saga = Saga.load(row)
-        await self._finish_failure(saga, failed_step="debit",
-                                  reason=str(payload.get("reason", "ledger: debit failed")))
+        failed_step = str(payload.get("step") or "debit")
+        await self._finish_failure(saga, failed_step=failed_step,
+                                   reason=str(payload.get("reason", "ledger: command failed")))
 
     # ===================================================================== #
     # step impls

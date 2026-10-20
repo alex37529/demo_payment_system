@@ -43,16 +43,26 @@ CREATE PUBLICATION outbox_publication FOR TABLE outbox_events;
 
 -- Phase 2 — write-side: ledger aggregate + idempotency guard.
 -- accounts: A1 seeded for the phase-2 exit test (debit -> balance 400, outbox+1).
+--
+-- `holds` (ADR-010): the per-payment reservations — {"<payment_id>": <amount>}.
+-- It is the source of truth for `reserved` (whose column is the derived sum):
+-- a debit CONSUMES the hold of its own payment. Without it, the hold was
+-- never released and `available = balance - reserved` shrank by every
+-- payment until the account refused payments it could afford.
 CREATE TABLE IF NOT EXISTS accounts (
     id         VARCHAR(64) PRIMARY KEY,
     owner_name VARCHAR(255) NOT NULL DEFAULT '',
     currency   VARCHAR(8)  NOT NULL,
     balance    BIGINT      NOT NULL DEFAULT 0,
     reserved   BIGINT      NOT NULL DEFAULT 0,
+    holds      JSONB       NOT NULL DEFAULT '{}'::jsonb,
     version    INTEGER     NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- For a volume created before ADR-010 (the init script only runs on the
+-- FIRST boot of a fresh volume).
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS holds JSONB NOT NULL DEFAULT '{}'::jsonb;
 INSERT INTO accounts (id, owner_name, currency, balance, reserved, version)
 VALUES ('A1', 'John', 'USD', 500, 0, 1)
 ON CONFLICT (id) DO NOTHING;

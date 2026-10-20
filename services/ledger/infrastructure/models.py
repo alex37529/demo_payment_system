@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String
+from sqlalchemy import JSON, BigInteger, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shared.db.base import Base
@@ -27,7 +27,17 @@ class AccountRow(Base):
     owner_name: Mapped[str] = mapped_column(String(255), default="")
     currency: Mapped[str] = mapped_column(String(8), nullable=False)
     balance: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    #: Derived projection of `holds` (the sum) — kept as a column so the
+    #: "how much is held" question is a plain indexed read, and so the
+    #: existing queries/alert rules keep working.
     reserved: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    #: payment_id -> held amount (minor units). The per-payment holds are
+    #: the SOURCE OF TRUTH for `reserved`: a debit consumes the hold of its
+    #: own payment (ADR-010). A JSONB map keeps the hold attached to the
+    #: account row it belongs to (loaded/saved in the same transaction);
+    #: the alternative — a separate `account_holds` table — costs an extra
+    #: query + insert/delete per reserve/cancel for the same information.
+    holds: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # optimistic lock (PoC: phase 7)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC))

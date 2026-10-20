@@ -27,6 +27,9 @@ from services.orchestrator.application.saga_handler import _failure_reason
         ("fraud", "decline", "fraud_decline"),
         # The ledger refused the money.
         ("debit", "insufficient funds", "insufficient_funds"),
+        # The ledger's actual rejection text (it never says "insufficient").
+        ("reserve", "reserve 60183 exceeds available 40939 (reserved 0)", "insufficient_funds"),
+        ("debit", "debit 900 exceeds spendable 100 (balance 100, reserved 0)", "insufficient_funds"),
         # A real timeout.
         ("fraud", "timeout", "timeout"),
     ],
