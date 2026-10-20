@@ -3,10 +3,10 @@
 SHELL := /bin/bash
 COMPOSE ?= docker compose
 
-.PHONY: up down ps logs seed test load acceptance smoke clean help
+.PHONY: up down ps logs seed test load fe acceptance smoke clean help
 
 help:
-	@echo "Targets: up down ps logs <svc> seed test load acceptance smoke clean"
+	@echo "Targets: up down ps logs <svc> seed test load fe acceptance smoke clean"
 
 up: ## Build + start the full stack, wait for healthy
 	$(COMPOSE) up -d --build
@@ -28,8 +28,26 @@ seed: ## Run the init/*.sql seed (20 users dual ledger + profile) against the li
 test: ## Run shared unit tests
 	python -m pytest -q
 
-load: ## Load test @ 50 TPS / 60s (phase 6)
-	@echo "load: implemented in phase 6 (mock-acquirer burst)."
+load: ## Load test @ 50 TPS (default 60s) via mock-acquirer, then poll + report
+	@TPS=$${TPS:-50}; DURATION=$${DURATION:-60}; \
+	echo "starting burst: tps=$$TPS duration=$$DURATIONs"; \
+	curl -fsS -X POST http://localhost:8006/acquirer/burst \
+	     -H 'Content-Type: application/json' \
+	     -d "{\"tps\":$$TPS,\"duration\":$$DURATION,\"include_invalids\":true}"; echo; \
+	i=0; \
+	while :; do \
+	  sleep 2; i=$$((i+1)); \
+	  st=$$(curl -fsS http://localhost:8006/acquirer/burst/status); \
+	  echo "  t+$$i*2s  status=$$st" | tr -d '\n'; echo; \
+	  running=$$(echo "$$st" | grep -o '"burst_running":[a-z]*'); \
+	  if echo "$$running" | grep -q "false"; then break; fi; \
+	  if [ $$i -gt 300 ]; then echo "  (timeout polling)"; break; fi; \
+	done; \
+	echo "final: $$(curl -fsS http://localhost:8006/acquirer/burst/status)"; \
+	echo "fraud CB: $$(curl -fsS http://localhost:8000/v1/_status)"
+
+fe: ## Build the React frontend (frontend/): npm ci && npm run build
+	cd frontend && npm ci && npm run build
 
 acceptance: ## Acceptance: 7 checks §7 TЗ v2 (phase 8)
 	bash scripts/acceptance.sh

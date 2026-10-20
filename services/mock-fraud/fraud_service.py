@@ -108,3 +108,8 @@ def attach_fraud(app: FastAPI) -> None:
     @app.get("/fraud/admin/mode")
     async def get_mode() -> JSONResponse:
         return JSONResponse({"mode": svc.mode, "hits": svc.hits})
+
+    @app.get("/fraud/status")
+    async def status() -> JSONResponse:
+        # phase-6 spec §3.1: convenience status surface (same data as /fraud/admin/mode)
+        return JSONResponse({"ok": True, "mode": svc.mode, "hits": svc.hits})

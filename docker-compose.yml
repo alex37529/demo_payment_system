@@ -227,9 +227,16 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
       LEDGER_ENABLE_CONSUMER: "0"
+      # BFF downstream targets (compose DNS names, internal :8080), tz_v2 §4.1.
+      INTAKE_BASE_URL: "http://intake:8080"
+      PROFILE_BASE_URL: "http://profile:8080"
+      NOTIFICATION_BASE_URL: "http://notification:8080"
+      ORCHESTRATOR_BASE_URL: "http://orchestrator:8080"
+      # Dev CORS: allow the Vite dev origin (5173) when not proxied. In Docker
+      # the nginx frontend serves from :5173 and proxies /v1 (same origin), so
+      # CORS is a no-op there — this covers the local `vite dev` case (spec §4.4).
+      CORS_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
     depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
       kafka: { condition: service_healthy }
     ports: ["8000:8080"]
     networks: [fintech]
@@ -307,8 +314,10 @@ services:
     container_name: fintech_mock_acquirer_service
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
+      # Where the generator POSTs create-payments (Intake, compose DNS).
+      INTAKE_URL: "http://intake:8080"
     depends_on:
-      postgres: { condition: service_healthy }
+      - intake
     ports: ["8006:8080"]
     networks: [fintech]
 
@@ -320,6 +329,18 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["8007:8080"]
+    networks: [fintech]
+
+  # ---------------------- frontend (phase 6) ----------------------
+  # Build the React/Vite app (node:20-alpine) and serve it via nginx. The
+  # nginx config proxies /v1 -> gateway:8080 (BFF). Port 5173 (NOT 3000 — that
+  # is Grafana, tz_v2 §4.1).
+  frontend:
+    build: { context: ./frontend }
+    container_name: fintech_frontend
+    depends_on:
+      - gateway
+    ports: ["5173:80"]
     networks: [fintech]
 
 volumes:
