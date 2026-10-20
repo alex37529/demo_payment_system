@@ -37,7 +37,7 @@ from services.ledger.domain import (
     LedgerError,
     Money,
 )
-from services.ledger.infrastructure.models import AccountRow
+from services.ledger.infrastructure.models import AccountRow, TransactionRow
 from services.ledger.infrastructure.repository import SQLAlchemyAccountRepository
 
 log = logging.getLogger(__name__)
@@ -262,6 +262,49 @@ def register_routes(app: FastAPI, tracker: DeliveryTracker) -> None:
     @app.post("/v1/accounts/{account_id}/cancel-reservation", response_model=CommandOut)
     async def cancel_reservation(account_id: str, body: LedgerCommandIn):
         return await _run_command(app, UseCase_CancelReservation, account_id, body)
+
+    @app.get("/v1/accounts/{account_id}/transactions")
+    async def transactions(account_id: str, limit: int = 50, offset: int = 0):
+        """Balance journal for an account (append-only, newest first).
+
+        Each row is self-describing: `amount`, `event_type` (debit vs refund),
+        and `balance_after` (running balance). The last row's `balance_after`
+        equals the account's current balance.
+        """
+        from sqlalchemy import func, select
+
+        sf = app.state.ledger_runner.session_factory
+        limit = min(500, max(1, limit))
+        offset = max(0, offset)
+        async with sf() as s:
+            base = select(TransactionRow).where(TransactionRow.account_id == account_id)
+            total = (await s.execute(
+                select(func.count()).select_from(base.subquery()))).scalar_one()
+            rows = (await s.execute(
+                base.order_by(TransactionRow.id.desc())
+                .limit(limit).offset(offset))).scalars().all()
+            current = await s.get(AccountRow, account_id)
+            if current is None:
+                raise AccountNotFound(account_id)
+            return {
+                "account_id": account_id,
+                "current_balance": current.balance,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "transactions": [
+                    {
+                        "id": r.id,
+                        "event_type": r.event_type,
+                        "amount": r.amount,
+                        "currency": r.currency,
+                        "balance_after": r.balance_after,
+                        "payment_id": r.payment_id,
+                        "event_id": r.event_id,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                    } for r in rows
+                ],
+            }
 
     @app.get("/v1/accounts/{account_id}")
     async def get_account(account_id: str):
