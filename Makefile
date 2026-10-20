@@ -3,10 +3,11 @@
 SHELL := /bin/bash
 COMPOSE ?= docker compose
 
-.PHONY: up down ps logs seed test load load-slo fe e2e acceptance smoke clean help
+.PHONY: up down ps logs seed test load load-slo fe e2e acceptance demo smoke clean help
 
 help:
-	@echo "Targets: up down ps logs <svc> seed test load load-slo fe e2e acceptance smoke clean"
+	@echo "Targets: up down ps logs <svc> seed test load load-slo fe e2e acceptance demo smoke clean"
+
 
 up: ## Build + start the full stack, wait for healthy
 	$(COMPOSE) up -d --build
@@ -57,6 +58,20 @@ e2e: ## E2E suite against the LIVE stack (needs `make up` first)
 
 acceptance: ## Acceptance: 7 checks §7 TЗ v2 (phase 8)
 	bash scripts/acceptance.sh
+
+demo: ## One-shot demo: clean stack + smoke + seed + load + failure-injection + acceptance
+	@echo "=== DEMO: 1/5 clean ==="
+	$(COMPOSE) down -v
+	@echo "=== DEMO: 2/5 up ==="
+	$(COMPOSE) up -d --build
+	@echo "=== DEMO: 3/5 smoke ==="
+	bash scripts/smoke_env.sh
+	@echo "=== DEMO: 4/5 seed ==="
+	bash scripts/seed_users.sh
+	@echo "=== DEMO: 5/5 acceptance (7 criteria) ==="
+	bash scripts/acceptance.sh --skip-setup --skip-teardown
+	@echo ""
+	@echo "=== DEMO: the stack is still up (UI: http://localhost:5173, Grafana: http://localhost:3000) ==="
 
 smoke: ## Phase 1 smoke: healthz x8 + topics + PG + redis + Debezium + Prometheus
 	bash scripts/smoke_env.sh

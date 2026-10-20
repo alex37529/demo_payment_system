@@ -75,6 +75,15 @@ bash scripts/smoke_env.sh         # or: make smoke  (healthz x8 + topics + PG + 
 python -m pytest -q               # or: make test   (the hermetic unit suite)
 ```
 
+### One command: the whole demo + the acceptance
+```bash
+make demo
+# → clean stack → up → smoke → seed → acceptance (7 criteria / 27 checks)
+# → "ACCEPTANCE: 27 passed, 0 failed" + "ALL ACCEPTANCE CRITERIA MET"
+```
+The stack is left running afterwards (UI on :5173, Grafana on :3000).
+`make acceptance` runs the same checks against the stack that is already up.
+
 ### Quick checks
 ```bash
 curl http://localhost:8000/healthz            # {"status":"ok","service":"gateway"}
@@ -83,6 +92,11 @@ curl -s http://localhost:8083/connectors/ledger-outbox/status   # ... "state":"R
 # UI: Grafana  http://localhost:3000  (admin/admin)  — dashboard "payments-overview"
 # Tempo:       http://localhost:3200   ·   Prometheus: http://localhost:9090
 ```
+
+> **Tempo (:3200) и Loki (:3100) отдают 404 на `/` — это нормально:** у них нет
+> собственного UI. Трейсы и логи смотрят в Grafana → Explore → Tempo / Loki.
+> Alertmanager (:9093) показывает только **срабатывающие** алерты — список пуст,
+> пока ни одно правило не в статусе `firing`.
 
 ### The demo in 4 commands
 ```bash
@@ -113,6 +127,18 @@ docker compose down            # make down
 docker compose down -v         # make clean
 ```
 
+## Limits (the PoC boundaries)
+
+| Ограничение | Почему | Что вместо |
+| --- | --- | --- |
+| KRaft single-node | PoC | HA — infra-задача |
+| In-memory state (режим fraud, sagas) | сбрасывается при restart | Redis / БД |
+| Own-currency (кросс-валюта вне скоупа) | tz_v2 §3.10, ADR-003 | FX-модель — v0.2 |
+| 24 h TTL идемпотентности | контракт §3.1 | длиннее — v0.2 |
+| Логи/трейсы: retention 72 h (Loki) / 3 d (Tempo) | PoC | больше — v0.2 |
+| Нет AuthN/AuthZ (Grafana — анонимный Admin) | local | OAuth2/RBAC — v1.0 |
+| Chaos-тесты = kill контейнера | PoC | toxiproxy — v0.2 |
+
 ## Docs
 | Document | What it is |
 | --- | --- |
@@ -124,5 +150,3 @@ docker compose down -v         # make clean
 | [`doc/events.md`](doc/events.md) | the event contracts (topics, payloads) |
 | [`doc/runbook.md`](doc/runbook.md) | operations: logs, metrics, traces, failure injection, DLQ |
 | [`doc/diagrams/`](doc/diagrams) | C4 + sequence diagrams |
-
-> **Next:** phase 8 — `doc/phases/08_release_acceptance.md` (acceptance + release).
