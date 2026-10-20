@@ -1,0 +1,27 @@
+# Normalize line endings — this repo is built and run in LINUX containers.
+#
+# Why: on Windows, `core.autocrlf=true` (the default) converts LF to CRLF on
+# checkout. The shell scripts are MOUNTED into containers and executed by the
+# container's Linux bash — with CRLF the shebang line becomes
+# `#!/usr/bin/env bash\r`, bash reports "command not found" and the init
+# container exits 127:
+#
+#     service "kafka-topics" didn't complete successfully: exit 127
+#
+# `eol=lf` makes git write LF in the working tree on EVERY platform, and
+# `text=auto` normalizes the index to LF, so the repo stays byte-identical
+# everywhere.
+* text=auto eol=lf
+
+# Scripts are executed, not read — they MUST be LF.
+*.sh text eol=lf
+*.bash text eol=lf
+Dockerfile text eol=lf
+*.conf text eol=lf
+
+# Binary-ish assets: never touch the line endings.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
