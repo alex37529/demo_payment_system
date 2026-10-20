@@ -89,7 +89,7 @@ The stack is left running afterwards (UI on :5173, Grafana on :3000).
 curl http://localhost:8000/healthz            # {"status":"ok","service":"gateway"}
 curl -s http://localhost:8000/metrics | grep http_request
 curl -s http://localhost:8083/connectors/ledger-outbox/status   # ... "state":"RUNNING"
-# UI: Grafana  http://localhost:3000  (admin/admin)  — dashboard "payments-overview"
+# UI: Grafana  http://localhost:3000  — dashboard "payments-overview"
 # Tempo:       http://localhost:3200   ·   Prometheus: http://localhost:9090
 ```
 
@@ -97,6 +97,37 @@ curl -s http://localhost:8083/connectors/ledger-outbox/status   # ... "state":"R
 > собственного UI. Трейсы и логи смотрят в Grafana → Explore → Tempo / Loki.
 > Alertmanager (:9093) показывает только **срабатывающие** алерты — список пуст,
 > пока ни одно правило не в статусе `firing`.
+
+### Grafana — пароль не придётся менять заново
+
+**Открывается без логина:** <http://localhost:3000> — анонимный доступ
+включён (стек слушает только localhost). Если предпочитаешь вход —
+`admin` / `admin`.
+
+Пароль **детерминирован**: он берётся из `.env`
+(`GRAFANA_ADMIN_PASSWORD`), а не из UI. Поэтому:
+
+| Событие | Что с паролем |
+| --- | --- |
+| `make up` (ребилд) | сохраняется (volume цел) |
+| `make clean` (volume снесён) | **тот же**, что в `.env` — пересоздаётся с ним |
+| смена в UI | переживает ребилд, но **не** переживёт `make clean` |
+
+Менять его правильно — **здесь**, а не в UI:
+
+```bash
+make setup                                # создаёт .env из .env.example
+make grafana-password PASSWORD=my-pass    # пишет в .env И меняет в живой Grafana
+```
+
+Скрипт меняет пароль в обоих местах (через `grafana cli admin
+reset-admin-password` — текущий пароль знать не нужно), так что `.env` и
+живая Grafana никогда не расходятся.
+
+> Brute-force защита Grafana **отключена** (`GF_SECURITY_DISABLE_BRUTE_FORCE_LOGIN_PROTECTION`):
+> по умолчанию 5 неудачных попыток за 5 минут **блокируют** аккаунт на 5 минут,
+> и пока он заблокирован — даже **правильный** пароль отклоняется («Invalid username
+> or password»). На локальном демо это чистый грабли.
 
 ### The demo in 4 commands
 ```bash

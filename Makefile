@@ -3,11 +3,22 @@
 SHELL := /bin/bash
 COMPOSE ?= docker compose
 
-.PHONY: up down ps logs seed test load load-slo fe e2e acceptance demo smoke clean help
+.PHONY: up down ps logs seed test load load-slo fe e2e acceptance demo smoke clean setup grafana-password help
 
 help:
-	@echo "Targets: up down ps logs <svc> seed test load load-slo fe e2e acceptance demo smoke clean"
+	@echo "Targets: up down ps logs <svc> seed test load load-slo fe e2e acceptance demo smoke clean setup grafana-password"
 
+setup: ## Create .env from .env.example (local config: Grafana password etc.)
+	@if [ -f .env ]; then \
+		echo ".env already exists — leaving it alone."; \
+	else \
+		cp .env.example .env && echo "created .env (edit it to taste)"; \
+	fi
+
+grafana-password: ## Set the Grafana admin password (make grafana-password PASSWORD=...)
+	@test -n "$(PASSWORD)" || (echo "usage: make grafana-password PASSWORD=..." && exit 1)
+	@$(MAKE) --no-print-directory setup
+	@python scripts/set_grafana_password.py "$(PASSWORD)"
 
 up: ## Build + start the full stack, wait for healthy
 	$(COMPOSE) up -d --build

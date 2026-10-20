@@ -35,6 +35,50 @@ curl -sG http://localhost:3100/loki/api/v1/query_range \
 > `msg:payment_created` does not work. `service` and `level` are labels;
 > `trace_id` is in the line body (search it with `|= "..."`).
 
+## Grafana — пароль
+
+**Открывается без логина:** <http://localhost:3000> (анонимный доступ
+включён, стек слушает только localhost). Логин-форма тоже работает:
+`admin` / `admin`.
+
+Пароль **не приходится менять заново**: он берётся из `.env`
+(`GRAFANA_ADMIN_PASSWORD`), а не из UI.
+
+```bash
+make setup                                # .env из .env.example (создаётся один раз)
+make grafana-password PASSWORD=my-pass    # .env + живая Grafana (одной командой)
+```
+
+| Событие | Что с паролем |
+| --- | --- |
+| `make up` / ребилд | сохраняется (volume цел) |
+| `make clean` (volume снесён) | **тот же**, что в `.env` |
+| смена в UI | переживает ребилд, но **не** переживёт `make clean` |
+
+Скрипт меняет пароль в **обоих** местах (через `grafana cli admin
+reset-admin-password` — текущий пароль знать не нужно), так что `.env` и
+живая Grafana не расходятся.
+
+> **Почему это не «просто пароль».** Grafana читает `GF_SECURITY_ADMIN_PASSWORD`
+> только при СОЗДАНИИ своей БД (первый старт или после `make clean`); дальше
+> пароль живёт в `grafana.db` и переменная игнорируется. Отсюда и «пришлось
+> менять заново»: либо volume пересоздался, либо пароль меняли в UI, а `.env`
+> об этом не знал.
+>
+> **Про блокировку.** По умолчанию Grafana **блокирует** аккаунт на 5 минут
+> после 5 неудачных входов за 5 минут, и пока аккаунт заблокирован — даже
+> **правильный** пароль отклоняется («Invalid username or password»). Для
+> локального демо это грабли, поэтому защита выключена
+> (`GF_SECURITY_DISABLE_BRUTE_FORCE_LOGIN_PROTECTION=true`).
+> Если аккаунт всё же заблокирован (напр. Grafana был запущен до этого
+> изменения) — сбросьте его:
+> ```bash
+> docker compose stop grafana
+> docker run --rm -v fintech_demo_grafana_data:/data python:3.11-slim \
+>   python -c "import sqlite3;c=sqlite3.connect('/data/grafana.db');c.execute('delete from login_attempt');c.commit()"
+> docker compose start grafana
+> ```
+
 ## Metrics & dashboards
 
 ```bash
