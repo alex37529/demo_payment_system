@@ -3,10 +3,10 @@
 SHELL := /bin/bash
 COMPOSE ?= docker compose
 
-.PHONY: up down ps logs seed test load fe acceptance smoke clean help
+.PHONY: up down ps logs seed test load load-slo fe e2e acceptance smoke clean help
 
 help:
-	@echo "Targets: up down ps logs <svc> seed test load fe acceptance smoke clean"
+	@echo "Targets: up down ps logs <svc> seed test load load-slo fe e2e acceptance smoke clean"
 
 up: ## Build + start the full stack, wait for healthy
 	$(COMPOSE) up -d --build
@@ -48,6 +48,12 @@ load: ## Load test @ 50 TPS (default 60s) via mock-acquirer, then poll + report
 
 fe: ## Build the React frontend (frontend/): npm ci && npm run build
 	cd frontend && npm ci && npm run build
+
+load-slo: ## Load harness with percentiles (50 TPS / 60s, fails if p99 > 300ms)
+	python scripts/load_test.py --tps 50 --duration 60 --slo 300
+
+e2e: ## E2E suite against the LIVE stack (needs `make up` first)
+	RUN_E2E=1 python -m pytest tests/e2e -v
 
 acceptance: ## Acceptance: 7 checks §7 TЗ v2 (phase 8)
 	bash scripts/acceptance.sh

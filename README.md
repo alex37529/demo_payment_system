@@ -2,16 +2,37 @@
 
 Event-driven payments demo showing best practices: **Saga orchestration**,
 **Transactional Outbox** (WAL + Debezium CDC), **CQRS**, **DDD aggregates**,
-**Circuit Breaker**, **Idempotency**. Full TЗ: `doc/tz_v2.md`, plan:
-`doc/implementation_plan.md`, phase docs: `doc/phases/`.
+**Circuit Breaker**, **Idempotency**, **Distributed tracing**. Full TЗ:
+`doc/tz_v2.md`, plan: `doc/implementation_plan.md`, phase docs: `doc/phases/`.
 
-## Phase 1 (this) — environment + shared abstractions + 8 placeholders
+## What it does
 
-`make up` brings up **18 containers**: Postgres (4 bases) · Redis 7 · Kafka
-(KRaft) · Kafka Connect + Debezium · Prometheus/Grafana/Tempo/Loki/Alertmanager ·
-promtail · 8 FastAPI placeholder services. `shared/` provides DDD base, event
-catalog, async DB + outbox, Kafka client (retry + DLQ), circuit breaker, state
-machine, observability, and idempotency — the contract for phases 2–6.
+A payment enters at the **Intake** (idempotently), the **Orchestrator** runs
+a saga (limits → reserve → fraud → debit), the **Ledger** moves the money
+and publishes the event through a **Transactional Outbox** (Debezium ships
+the Postgres WAL to Kafka), and the **read-side** (Profile, Notification)
+projects the new balance and streams it to the browser over SSE. Failures
+are contained by a **circuit breaker** and parked in a **DLQ** — never lost.
+
+```
+Browser → Gateway/BFF → Intake → Kafka → Orchestrator → Kafka → Ledger → Postgres
+                                              ↓ fraud (CB)              ↓ WAL
+                                          mock-fraud              Debezium → Kafka
+                                                                             ↓
+                                                        Profile + Notification → SSE
+```
+
+## Phases 1–7 — what is built
+
+| Phase | What it added |
+| --- | --- |
+| 1 | The environment + `shared/` (DDD base, event catalogue, async DB, outbox, Kafka client, CB, state machine, observability, idempotency) |
+| 2 | **Ledger** write-side: balance aggregates, Transactional Outbox, idempotency guard |
+| 3 | **Orchestrator**: saga + state machine + watchdog + compensation + DLQ |
+| 4 | **Intake**: idempotent payment creation (`Idempotency-Key`) |
+| 5 | **Read-side**: Profile (balance projection) + Notification (SSE feed) |
+| 6 | **Mocks + frontend + gateway BFF**: load generator, fraud failure injection, React UI |
+| 7 | **Observability**: end-to-end traces, custom metrics, the `payments-overview` dashboard, alert rules, the E2E suite, the load harness |
 
 ## Stack
 Python 3.11 · FastAPI · SQLAlchemy 2.0 (async) · Pydantic v2 · aiokafka ·
@@ -19,14 +40,16 @@ aiobreaker · python-statemachine · OpenTelemetry → Tempo · Prometheus · Lo
 
 ## Layout
 ```
-shared/          # DDD + db + outbox + kafka + circuit + state_machine + observability + idempotency
-services/<name>/ # 8 placeholder FastAPI apps (each: POST /healthz, /metrics, /_status)
+shared/          # DDD + db + outbox + kafka + circuit + state_machine + observability + metrics + tracing
+services/<name>/ # 8 FastAPI apps (gateway, intake, orchestrator, ledger, profile, notification, 2 mocks)
 docker-compose.yml
 kafka/           # topics.sh + Debezium connector + register script
-init/            # 01_databases.sql (4 bases + outbox + publication)
+init/            # 01_databases.sql (4 bases + outbox + publication + seed)
 observability/   # prometheus / tempo / loki / promtail / grafana / alertmanager
-scripts/         # smoke_env.sh, acceptance.sh, register_connector.py
-doc/             # TЗ v2, plan, phases, ADRs
+frontend/        # React 18 + Vite + TS
+scripts/         # smoke_env.sh, acceptance.sh, load_test.py, register_connector.py
+doc/             # TЗ v2, plan, phases, ADRs, diagrams, events.md, runbook.md
+tests/           # unit suites + tests/e2e (the live-stack E2E)
 ```
 
 ### Container naming (deliberate: "ours" vs third-party)
@@ -37,18 +60,19 @@ the `fintech_` prefix separates them from unrelated dockers on the host.
 | --- | --- |
 | **Our services** (8) | `fintech_gateway_service`, `fintech_intake_service`, `fintech_orchestrator_service`, `fintech_ledger_service`, `fintech_profile_service`, `fintech_notification_service`, `fintech_mock_acquirer_service`, `fintech_mock_fraud_service` |
 | Our one-shot helpers | `fintech_kafka_topics_init`, `fintech_debezium_register` |
+| Our frontend | `fintech_frontend` |
 | Third-party infra | `fintech_postgres`, `fintech_redis`, `fintech_kafka`, `fintech_kafka_connect`, `fintech_prometheus`, `fintech_tempo`, `fintech_loki`, `fintech_promtail`, `fintech_alertmanager`, `fintech_grafana` |
 
 > The compose **service keys** (DNS) keep the short names (`gateway`, `ledger`, `tempo`, …) —
 > services discover each other by those; `container_name` only affects `docker ps` / `docker logs`.
 
-## Run (phase 1)
+## Run
 ```bash
 # Requires Docker (Linux containerd), >= 8 GB RAM, Git Bash (Windows).
 docker compose up -d --build      # or: make up
 docker compose ps                 # 18/18 running
 bash scripts/smoke_env.sh         # or: make smoke  (healthz x8 + topics + PG + redis + Debezium + Prometheus)
-python -m pytest -q               # or: make test   (22 shared tests)
+python -m pytest -q               # or: make test   (the hermetic unit suite)
 ```
 
 ### Quick checks
@@ -59,6 +83,16 @@ curl -s http://localhost:8083/connectors/ledger-outbox/status   # ... "state":"R
 # UI: Grafana  http://localhost:3000  (admin/admin)  — dashboard "payments-overview"
 # Tempo:       http://localhost:3200   ·   Prometheus: http://localhost:9090
 ```
+
+### The demo in 4 commands
+```bash
+make load                                  # 50 TPS / 60 s -> the UI feed flies
+curl -X POST http://localhost:8007/fraud/admin/fail -d '{"mode":"errors"}'
+curl http://localhost:8000/v1/_status      # {"circuit_breakers":{"fraud":{"state":"OPEN"}}}
+curl -X POST http://localhost:8007/fraud/admin/fail -d '{"mode":"off"}'
+```
+
+More in **[doc/runbook.md](doc/runbook.md)**.
 
 ### Ports (see `doc/tz_v2.md §4.1`)
 | svc | host | | infra | host |
@@ -71,7 +105,7 @@ curl -s http://localhost:8083/connectors/ledger-outbox/status   # ... "state":"R
 | notification | 8005 | | alertmanager | 9093 |
 | mock-acquirer | 8006 | | tempo | 3200 / 4317 |
 | mock-fraud | 8007 | | loki | 3100 |
-| | | | **grafana** | 3000 |
+| frontend | 5173 | | **grafana** | 3000 |
 
 ## Teardown
 ```bash
@@ -79,4 +113,16 @@ docker compose down            # make down
 docker compose down -v         # make clean
 ```
 
-> **Next:** phase 2 — `doc/phases/02_ledger_write_side.md` (Ledger write-side + Outbox).
+## Docs
+| Document | What it is |
+| --- | --- |
+| [`doc/tz_v2.md`](doc/tz_v2.md) | the TЗ (the requirements) |
+| [`doc/implementation_plan.md`](doc/implementation_plan.md) | the phase plan |
+| [`doc/phases/`](doc/phases) | the per-phase specs |
+| [`doc/done/`](doc/done) | the per-phase delivery reports |
+| [`doc/adr/`](doc/adr) | the architecture decision records |
+| [`doc/events.md`](doc/events.md) | the event contracts (topics, payloads) |
+| [`doc/runbook.md`](doc/runbook.md) | operations: logs, metrics, traces, failure injection, DLQ |
+| [`doc/diagrams/`](doc/diagrams) | C4 + sequence diagrams |
+
+> **Next:** phase 8 — `doc/phases/08_release_acceptance.md` (acceptance + release).

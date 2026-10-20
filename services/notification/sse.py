@@ -32,11 +32,24 @@ class SSERelay:
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
         self._subscribers.append(q)
+        self._publish_count()
         return q
 
     def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
         if q in self._subscribers:
             self._subscribers.remove(q)
+        self._publish_count()
+
+    def _publish_count(self) -> None:
+        """Publish the subscriber count to Prometheus (phase-7 spec §3.1).
+
+        The gauge is the "how many browsers are actually attached" signal the
+        dashboard shows; it must move on BOTH subscribe and unsubscribe, so it
+        is refreshed after every change of the subscriber set.
+        """
+        from shared.metrics import set_sse_connections
+
+        set_sse_connections(len(self._subscribers))
 
     @property
     def subscriber_count(self) -> int:

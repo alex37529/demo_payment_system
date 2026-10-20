@@ -1,14 +1,43 @@
-# Alertmanager — minimal routing (no notifier targets in Phase 1).
-# Valid top-level keys: global, route, receivers, inhibit_rules.
+# Alertmanager (phase-7 spec §5).
+#
+# The receiver is intentionally LOCAL: in a PoC there is no on-call rotation
+# and no Slack/EMAIL/PagerDuty endpoint to post to. The alert must still be
+# VISIBLE somewhere, so it is forwarded to a webhook that writes the alert
+# into the log stream (the same JSON logs Loki already indexes) — that way
+# `docker logs alertmanager` and the Grafana "Alerts" tab both show it, and
+# a real receiver can be added later by replacing this ONE block.
 global:
   resolve_timeout: 5m
 
 route:
-  group_by: ["alertname"]
-  receiver: "null"
+  group_by: ["alertname", "severity"]
+  # severity: critical -> 10s, everything else -> 1m. A critical alert
+  # (CB open) should not wait behind a bunch of warnings.
   group_wait: 10s
   group_interval: 10s
   repeat_interval: 1h
+  receiver: "local"
+
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: "local"
+      group_wait: 10s
+      repeat_interval: 30m
 
 receivers:
-  - name: "null"
+  - name: "local"
+    # Local, dependency-free sink: the alert is POSTed back into our own
+    # stack, where it lands in the same log pipeline the services use.
+    webhook_configs:
+      - url: "http://gateway:8080/v1/_alerts"
+        send_resolved: true
+        max_alerts: 0
+
+# Do not page twice for the same underlying problem.
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname"]

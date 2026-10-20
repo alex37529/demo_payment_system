@@ -1,23 +1,72 @@
+# Prometheus alert rules (phase-7 spec §5).
+#
+# Every expr here must match a metric that ACTUALLY EXISTS in this stack —
+# an alert on a missing metric never fires, which is worse than no alert
+# (it looks like everything is fine). The metrics used below are the ones
+# published by shared/metrics.py + the FastAPI instrumentator.
 groups:
   - name: fintech_payments
+    interval: 15s
     rules:
+      # --- latency SLO (tz_v2 §4: P99 < 300 ms) ----------------------------
+      # The high-resolution histogram (many buckets) gives a usable p99; the
+      # low-resolution one only has buckets 0.1/0.5/1 -> its p99 is useless.
       - alert: HighP99Latency
-        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[3m])) by (le)) > 0.5
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_highr_seconds_bucket[3m]))) > 0.3
         for: 3m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
-          summary: "P99 latency > 500ms for 3m"
+          summary: "P99 latency > 300ms for 3m (SLO tz_v2 §4)"
+          description: "The p99 of the HTTP request duration is {{ $value | humanizeDuration }} — above the 300ms SLO."
 
+      # --- circuit breaker -------------------------------------------------
+      # pybreaker_open{owner,protected}: 1 = OPEN. The orchestrator's fraud
+      # breaker opening means the fraud API is failing and payments are being
+      # routed to the DLQ instead of flowing through.
       - alert: CircuitBreakerOpen
         expr: pybreaker_open == 1
-        for: 0m
-        labels: { severity: warning }
+        for: 30s
+        labels:
+          severity: critical
         annotations:
-          summary: "Circuit breaker (Fraud) is OPEN"
+          summary: "Circuit breaker OPEN ({{ $labels.owner }} -> {{ $labels.protected }})"
+          description: "The {{ $labels.protected }} breaker in {{ $labels.owner }} has been open for 30s; payments are being routed to the DLQ."
 
+      # --- DLQ -------------------------------------------------------------
+      # A growing DLQ means payments are being lost instead of completed.
+      # `increase` over 10m (not the raw counter) so the alert fires on NEW
+      # dead letters rather than on the cumulative total since boot.
       - alert: DLQDepth
-        expr: kafka_log_end_offset{kafka_topic=~".*\\.dlq"} > 10
+        expr: sum(increase(dlq_messages_total[10m])) > 10
         for: 1m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
-          summary: "DLQ depth > 10"
+          summary: "DLQ is growing ({{ $value | printf \"%.0f\" }} messages in 10m)"
+          description: "Payments are being routed to a dead-letter topic instead of completing."
+
+      # --- consumer lag ----------------------------------------------------
+      # A consumer that cannot keep up will eventually lose the SLO on latency.
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_lag > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag high ({{ $labels.consumer }} on {{ $labels.topic }} = {{ $value }})"
+          description: "The consumer is more than 1000 messages behind the producer."
+
+      # --- the read-side died ----------------------------------------------
+      # The profile read model is what the UI shows; if it is not being
+      # scraped, the balances the browser displays are frozen.
+      # NOTE: the `up` metric carries the scrape TARGET's labels
+      # (job/instance) — the `service` label is added by the app to ITS OWN
+      # metrics, so it is NOT on `up`. Match on `instance` instead.
+      - alert: ServiceMetricsMissing
+        expr: absent(up{job="services",instance=~"profile:.*"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Profile service is not scrapeable — the UI balances are frozen"
