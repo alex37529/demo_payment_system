@@ -8,13 +8,13 @@ positions:
 
 clients:
   - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 1048576
 
 scrape_configs:
   # One promtail reads every container's docker-json log file (+1 container,
   # not +8 sidecars). The `docker` stage unwraps {"log":...,"stream":...,"time":...}
-  # so Loki stores the inner log line. Per-service JSON fields (service/path/
-  # trace_id) are structured in the line itself; parsing them into Loki labels
-  # is a phase-7 nicety (see 07_observability_tests.md).
+  # so Loki stores the inner log line.
   - job_name: docker
     static_configs:
       - targets: [localhost]
@@ -23,3 +23,28 @@ scrape_configs:
           __path__: /var/lib/docker/containers/*/*-json.log
     pipeline_stages:
       - docker: {}
+
+      # --- phase 7: turn the service's JSON log line into Loki LABELS -------
+      # Our services emit one JSON object per request (shared/observability.py
+      # JsonLogMiddleware): {"ts":…,"level":"INFO","service":"intake",…}.
+      #
+      # Pitfall #6: Loki indexes LABELS only — a text filter like
+      # `msg:payment_created` does NOT work. `service` and `level` MUST be
+      # labels, otherwise the Grafana Logs tab cannot filter by them
+      # ({service="intake"} | level=ERROR) and every line is unsearchable.
+      #
+      # The `json` stage parses the line into an "extracted" map (it does NOT
+      # rewrite the log body — the full JSON line stays queryable) and the
+      # `labels` stage promotes two of those fields to Loki labels.
+      #
+      # Lines that are NOT JSON (uvicorn's own startup/access lines) cannot be
+      # parsed; they are still shipped, just without the service/level labels
+      # (promtail tags them with __error__=JSONParserErr).
+      - json:
+          expressions:
+            level: level
+            service: service
+            trace_id: trace_id
+      - labels:
+          level:
+          service:

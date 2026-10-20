@@ -5,11 +5,27 @@ name: fintech_demo
 #
 # CONTAINER NAMING: fintech_ prefix; our services -> <name>_service; infra -> clean base name.
 # Compose SERVICE KEYS keep short names (DNS discovery); container_name sets the docker ps name.
+# --- log driver -------------------------------------------------------------
+# Docker's default `local` driver writes GZIPPED logs to
+# `<id>/local-logs/container.log`, which promtail cannot parse (it tails
+# `<id>/<id>-json.log`, the `json-file` format). With `local`, Loki received
+# NOTHING at all — promtail only ever saw the stale `-json.log` files of dead
+# containers (phase-7 finding).
+#
+# `json-file` + the `docker` promtail stage is the supported combination:
+# the container's stdout is one JSON object per line, unwrapped into
+# {"log":...,"stream":...,"time":...} and parsed into Loki labels (service/level).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 services:
   # ---------------------- data stack ----------------------
   postgres:
     image: postgres:16
     container_name: fintech_postgres
+    logging: *default-logging
     command: >
       postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_size=2GB
     environment:
@@ -30,6 +46,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: fintech_redis
+    logging: *default-logging
     command: redis-server --appendonly yes
     ports:
       - "6379:6379"
@@ -44,6 +61,7 @@ services:
   kafka:
     image: apache/kafka:3.7.0
     container_name: fintech_kafka
+    logging: *default-logging
     environment:
       KAFKA_NODE_ID: "0"
       KAFKA_PROCESS_ROLES: "controller,broker"
@@ -75,6 +93,7 @@ services:
   kafka-topics:
     image: apache/kafka:3.7.0
     container_name: fintech_kafka_topics_init
+    logging: *default-logging
     depends_on:
       kafka:
         condition: service_healthy
@@ -92,6 +111,7 @@ services:
   kafka-connect:
     image: debezium/connect:2.5
     container_name: fintech_kafka_connect
+    logging: *default-logging
     depends_on:
       kafka:
         condition: service_healthy
@@ -122,6 +142,7 @@ services:
   debezium:
     image: python:3.11-slim
     container_name: fintech_debezium_register
+    logging: *default-logging
     depends_on:
       kafka-connect:
         condition: service_healthy
@@ -143,6 +164,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: fintech_prometheus
+    logging: *default-logging
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -157,6 +179,7 @@ services:
   tempo:
     image: grafana/tempo:2.5.0
     container_name: fintech_tempo
+    logging: *default-logging
     command: ["-config.file=/etc/tempo/tempo.yml"]
     volumes:
       - ./observability/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
@@ -169,6 +192,7 @@ services:
   loki:
     image: grafana/loki:3.1.0
     container_name: fintech_loki
+    logging: *default-logging
     command: ["-config.file=/etc/loki/loki.conf"]
     volumes:
       - ./observability/loki/loki.conf:/etc/loki/loki.conf:ro
@@ -180,6 +204,7 @@ services:
   promtail:
     image: grafana/promtail:3.1.0
     container_name: fintech_promtail
+    logging: *default-logging
     command: ["-config.file=/etc/promtail/promtail.yaml"]
     volumes:
       - ./observability/promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
@@ -190,6 +215,7 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.27.0
     container_name: fintech_alertmanager
+    logging: *default-logging
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
       - "--storage.path=/alertmanager"
@@ -203,6 +229,7 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     container_name: fintech_grafana
+    logging: *default-logging
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -223,6 +250,7 @@ services:
   gateway:
     build: { context: ., args: { SERVICE_NAME: gateway } }
     container_name: fintech_gateway_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
@@ -244,6 +272,7 @@ services:
   intake:
     build: { context: ., args: { SERVICE_NAME: intake } }
     container_name: fintech_intake_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
@@ -259,6 +288,7 @@ services:
   orchestrator:
     build: { context: ., args: { SERVICE_NAME: orchestrator } }
     container_name: fintech_orchestrator_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
@@ -274,6 +304,7 @@ services:
   ledger:
     build: { context: ., args: { SERVICE_NAME: ledger } }
     container_name: fintech_ledger_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
@@ -288,6 +319,7 @@ services:
   profile:
     build: { context: ., args: { SERVICE_NAME: profile } }
     container_name: fintech_profile_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
@@ -301,6 +333,7 @@ services:
   notification:
     build: { context: ., args: { SERVICE_NAME: notification } }
     container_name: fintech_notification_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       KAFKA_BROKERS: "kafka:9092"
@@ -312,6 +345,7 @@ services:
   mock-acquirer:
     build: { context: ., args: { SERVICE_NAME: mock-acquirer } }
     container_name: fintech_mock_acquirer_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
       # Where the generator POSTs create-payments (Intake, compose DNS).
@@ -324,6 +358,7 @@ services:
   mock-fraud:
     build: { context: ., args: { SERVICE_NAME: mock-fraud } }
     container_name: fintech_mock_fraud_service
+    logging: *default-logging
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4317"
     depends_on:
@@ -338,6 +373,7 @@ services:
   frontend:
     build: { context: ./frontend }
     container_name: fintech_frontend
+    logging: *default-logging
     depends_on:
       - gateway
     ports: ["5173:80"]
