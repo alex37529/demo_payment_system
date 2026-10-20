@@ -75,16 +75,54 @@ async def test_debit_reduces_balance_and_writes_outbox(env):
 
 
 async def test_debit_insufficient_rolls_back_cleanly(env):
+    """A rejected debit changes NOTHING — but it IS announced (ADR-010).
+
+    The balance is untouched and no command was applied, but the saga needs
+    to learn that the command was refused: it waits for the confirmation
+    event of the step it asked for, and with silence it would hang until
+    the watchdog compensated it 30s later. So the rejection is published as
+    a `DebitFailed` event (in its own transaction — the command's TX is
+    rolled back).
+    """
     runner, repo, sf = env
     before = await _outbox_n(sf)
     with pytest.raises(InsufficientFundsError):
         await UseCase_Debit(session_factory=sf, repo=repo).execute(
             account_id="A1", amount=Money(600, "USD"), payment_id="P2")
     assert await _balance(sf, "A1") == 500  # unchanged
-    assert await _outbox_n(sf) == before   # no outbox row
     async with sf() as s:
         from sqlalchemy import select
         assert (await s.execute(select(AppliedCommandRow))).scalars().all() == []
+    # Exactly one outbox row: the rejection announcement (not a FundsDebited).
+    assert await _outbox_n(sf) == before + 1
+    async with sf() as s:
+        from sqlalchemy import select
+        row = (await s.execute(select(OutboxEvent))).scalars().one()
+    assert row.topic == "ledger.events"
+    assert row.payload["event_type"] == "DebitFailed"
+    assert row.payload["step"] == "debit"
+    assert row.payload["payment_id"] == "P2"
+    assert "600" in row.payload["reason"]
+
+
+async def test_rejected_reserve_announces_the_step(env):
+    """A rejected RESERVE must be announced as such (step=reserve).
+
+    The saga that issued it must be able to tell "the reserve was refused"
+    from "the reserve is still in flight" — the `step` field is what makes
+    the difference, and it is what the orchestrator uses to pick the
+    compensation (nothing was booked -> Failed, not RolledBack).
+    """
+    runner, repo, sf = env
+    with pytest.raises(InsufficientFundsError):
+        await UseCase_Reserve(session_factory=sf, repo=repo).execute(
+            account_id="A1", amount=Money(600, "USD"), payment_id="P3")
+    async with sf() as s:
+        from sqlalchemy import select
+        row = (await s.execute(select(OutboxEvent))).scalars().one()
+    assert row.payload["event_type"] == "DebitFailed"
+    assert row.payload["step"] == "reserve"
+    assert row.payload["payment_id"] == "P3"
 
 
 async def test_debit_unknown_account(env):

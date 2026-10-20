@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
-# Phase 8 acceptance stub (7 checks per §7 TЗ v2). Real checks land in phase 8.
-set -euo pipefail
-echo "[acceptance] phase-8 acceptance checks (7 checks §7 TЗ v2)."
-echo "  1. Consistency   (kill ledger -> outbox event not lost/duplicated)"
-echo "  2. Resiliency    (fraud/admin/fail errors -> CB open, DLQ up, valid >=10 TPS)"
-echo "  3. Observability (single trace_id Gateway -> Ledger in Tempo)"
-echo "  4. Code quality  (SOLID, no cross-context DB reads)"
-echo "  5. UI/UX         (SSE auto-reconnect, live balance)"
-echo "  6. SLO           (>=50 TPS, P99 < 300ms)"
-echo "[acceptance] full script implemented in phase 8 (08_release_acceptance.md)."
-exit 0
+# Acceptance entry point (phase 8) — the 7 criteria of §7 TЗ v2.
+#
+# The implementation lives in scripts/acceptance.py: the checks need JSON/DB/
+# Kafka inspection and POLLING with a timeout, which is far more readable in
+# Python than in a shell pipeline (and the machine may not have `jq`).
+#
+#   ./scripts/acceptance.sh              # recreate the stack, run all checks
+#   ./scripts/acceptance.sh --skip-setup # use the running stack
+set -uo pipefail   # no -e: we want to collect ALL results, not stop at the first failure
+
+cd "$(dirname "$0")/.."
+
+if command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "acceptance: python is required" >&2
+  exit 2
+fi
+
+exec "$PY" scripts/acceptance.py "$@"

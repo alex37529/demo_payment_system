@@ -26,6 +26,7 @@ import os
 from typing import Any
 
 from fastapi import FastAPI, Header, Request
+from opentelemetry import trace
 from starlette.responses import JSONResponse
 
 from services.intake.application import (
@@ -220,6 +221,14 @@ def _register_routes(app: FastAPI) -> None:
             return JSONResponse(status_code=503,
                                 content={"ok": False, "error": "kafka_unavailable",
                                          "detail": str(e)})
+        # Tag the span with the payment id, so a trace can be FOUND by
+        # payment in Tempo (`/api/search?tags=payment_id=...`) — the
+        # trace id is only known to the client that made the request.
+        payment_id = str((body or {}).get("payment_id") or "")
+        if payment_id:
+            span = trace.get_current_span()
+            if span.is_recording():
+                span.set_attribute("payment_id", payment_id)
         return JSONResponse(status_code=status, content=body)
 
     @app.get("/v1/payments/{payment_id}")

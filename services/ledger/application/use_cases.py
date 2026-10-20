@@ -14,6 +14,7 @@ Any `InsufficientFundsError` / `IntegrityError` (replay) => `rollback`, raise.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -27,6 +28,7 @@ from services.ledger.infrastructure.models import AccountRow, TransactionRow
 from shared.db.repository import IAccountRepository
 from shared.domain.events import (
     CancelReservationPosted,
+    DebitFailed,
     FundsDebited,
     FundsReserved,
     RefundPosted,
@@ -35,6 +37,8 @@ from shared.metrics import inc_processed
 from shared.outbox import OutboxMixin
 
 TOPIC_LEDGER_EVENTS = "ledger.events"
+
+log = logging.getLogger(__name__)
 
 
 def idem_ref(payment_id: str, op: str) -> str:
@@ -59,6 +63,7 @@ class _AccountUseCase(OutboxMixin):
         amount: Money,
         payment_id: str,
         reason: str = "",
+        saga_id: str = "",
     ) -> dict:
         ref = payment_id or str(uuid.uuid4())
         session = self.session_factory()
@@ -78,7 +83,7 @@ class _AccountUseCase(OutboxMixin):
                 op=self.OP,
                 account_id=account_id,
                 payment_id=payment_id,
-                saga_id="",
+                saga_id=saga_id,
                 session=session,
             )
             if not applied:  # replay -> drop our changes, return idempotent success
@@ -98,8 +103,18 @@ class _AccountUseCase(OutboxMixin):
             # settle a payment.
             if type(event).__name__ in self.JOURNALABLE:
                 inc_processed("ledger")
-        except (InsufficientFundsError, AccountNotFound):
+        except (InsufficientFundsError, AccountNotFound) as e:
             await session.rollback()
+            # A rejected command MUST be announced (ADR-010). The saga waits
+            # for the confirmation event of the step it asked for; if the
+            # ledger answers a rejection with SILENCE, the saga cannot tell
+            # "the reserve is still in flight" from "the reserve was
+            # refused" and hangs until the watchdog compensates it 30s
+            # later. The rejection is published in its OWN transaction (the
+            # command's TX is rolled back — nothing was changed).
+            await self._publish_rejection(
+                payment_id=payment_id, saga_id=saga_id, reason=str(e)
+            )
             raise
         except Exception:
             await session.rollback()
@@ -148,9 +163,45 @@ class _AccountUseCase(OutboxMixin):
         ))
 
     async def execute(self, *, account_id: str, amount: Money,
-                      payment_id: str = "", reason: str = "") -> dict:
+                      payment_id: str = "", reason: str = "",
+                      saga_id: str = "") -> dict:
         return await self._run(account_id=account_id, amount=amount,
-                               payment_id=payment_id, reason=reason)
+                               payment_id=payment_id, reason=reason, saga_id=saga_id)
+
+    async def _publish_rejection(self, *, payment_id: str, saga_id: str, reason: str) -> None:
+        """Announce a REJECTED command as a `DebitFailed` event (ADR-010).
+
+        The event goes through the outbox like every other event — but in
+        its OWN transaction: the command's transaction has been rolled back
+        (nothing was changed), and a rejection event written into a
+        rolled-back transaction would be lost with it.
+
+        The canonical catalogue already has the event (`DebitFailed`) and it
+        already carries a ``step`` field — the orchestrator's
+        `on_debit_failed` handler is already wired to it. It was simply
+        never produced (the phase-3 note said so explicitly). Now the
+        saga learns about a refusal immediately instead of stalling until
+        the watchdog compensates it.
+        """
+        if not payment_id:
+            return
+        event = DebitFailed(
+            payment_id=payment_id,
+            saga_id=saga_id,
+            step=self.OP,
+            reason=reason,
+        )
+        session = self.session_factory()
+        try:
+            async with session.begin():
+                self._publish_outbox(session, TOPIC_LEDGER_EVENTS, event)
+        except Exception:  # noqa: BLE001 — a failed announcement must not mask
+            # the original rejection (the saga will still time out and be
+            # compensated by the watchdog).
+            log.warning("could not publish the rejection event for %s: %s",
+                        payment_id, reason)
+        finally:
+            await session.close()
 
 
 class UseCase_Debit(_AccountUseCase):

@@ -79,10 +79,79 @@ def test_reserve_increases_reserved(account_dollar):
 
 
 def test_reserve_then_debit_blocked(account_dollar):
-    account_dollar.reserve(Money(200, "USD"))
-    # available = 500 - 200 = 300; debit 400 must fail
+    """A hold of ANOTHER payment blocks a debit (ADR-010).
+
+    The debit of a payment that holds money for ITSELF may spend it — the
+    saga reserves exactly what it is about to debit. But a hold that
+    belongs to a DIFFERENT payment is untouchable: the money is spoken for.
+    """
+    account_dollar.reserve(Money(200, "USD"), ref="P-OTHER")
+    # available = 500 - 200 = 300; debit 400 (of an unrelated payment) must fail
     with pytest.raises(InsufficientFundsError):
-        account_dollar.debit(Money(400, "USD"))
+        account_dollar.debit(Money(400, "USD"), ref="P-MINE")
+
+
+def test_debit_consumes_its_own_hold(account_dollar):
+    """The core of ADR-010: the debit spends the money ITS payment held.
+
+    Before the fix the hold was never released, so `available` shrank by
+    every payment and a user whose balance EXACTLY equalled the payment
+    amount could not pay it (the reserve left available=0, then the debit
+    was refused).
+    """
+    account_dollar.reserve(Money(100, "USD"), ref="P1")
+    assert account_dollar.reserved == Money(100, "USD")
+    assert account_dollar.available == Money(400, "USD")
+
+    account_dollar.debit(Money(100, "USD"), ref="P1")
+    assert account_dollar.balance == Money(400, "USD")
+    # The hold is GONE — the money that was held is the money that left.
+    assert account_dollar.reserved == Money(0, "USD")
+    assert account_dollar.available == Money(400, "USD")
+
+
+def test_debit_may_spend_its_whole_balance(account_dollar):
+    """A user whose balance equals the payment amount CAN pay it.
+
+    This is the case that was broken: reserve(500) left available=0 and
+    the debit of 500 was then refused as "exceeds available 0".
+    """
+    account_dollar.reserve(Money(500, "USD"), ref="P1")
+    account_dollar.debit(Money(500, "USD"), ref="P1")
+    assert account_dollar.balance == Money(0, "USD")
+    assert account_dollar.reserved == Money(0, "USD")
+
+
+def test_holds_are_tracked_per_payment(account_dollar):
+    """Two concurrent reservations are two separate holds."""
+    account_dollar.reserve(Money(100, "USD"), ref="P1")
+    account_dollar.reserve(Money(200, "USD"), ref="P2")
+    assert account_dollar.reserved == Money(300, "USD")
+    assert account_dollar.hold_for("P1") == 100
+    assert account_dollar.hold_for("P2") == 200
+    # P1's debit consumes ONLY P1's hold.
+    account_dollar.debit(Money(100, "USD"), ref="P1")
+    assert account_dollar.reserved == Money(200, "USD")
+    assert account_dollar.hold_for("P1") == 0
+    assert account_dollar.hold_for("P2") == 200
+
+
+def test_cancel_reservation_releases_that_payment_hold(account_dollar):
+    account_dollar.reserve(Money(100, "USD"), ref="P1")
+    account_dollar.reserve(Money(200, "USD"), ref="P2")
+    account_dollar.cancel_reservation(Money(100, "USD"), ref="P1")
+    assert account_dollar.hold_for("P1") == 0
+    assert account_dollar.reserved == Money(200, "USD")
+
+
+def test_reserved_survives_a_round_trip(account_dollar):
+    """The per-payment holds are persisted, so a hold is still there after
+    the account is reloaded from the DB (the reserve and the debit are
+    SEPARATE transactions)."""
+    account_dollar.reserve(Money(150, "USD"), ref="P1")
+    row = account_dollar.to_row()
+    assert row["reserved"] == 150
+    assert row["holds"] == {"P1": 150}
 
 
 def test_reserve_exceeds_available(account_dollar):

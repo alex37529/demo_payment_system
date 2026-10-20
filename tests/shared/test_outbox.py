@@ -14,18 +14,32 @@ def test_outbox_event_dict(event):
     assert len(row.event_id) == 36  # generated uuid
 
 
-def test_outbox_event_starts_pending_with_tracking_fields(event):
+def test_outbox_event_is_append_only(event):
+    """The outbox row must NOT carry a delivery state.
+
+    Every UPDATE of a captured table is another change event for Debezium —
+    i.e. another message in `ledger.events` for the SAME event. The delivery
+    state therefore lives in `outbox_delivery` (ADR-008).
+    """
     from shared.outbox import FAILED, PENDING, PUBLISHED, STATUS_VALUES
 
     assert STATUS_VALUES == (PENDING, PUBLISHED, FAILED)
     row = OutboxEvent(event=event, topic="ledger.events")
-    # A freshly written outbox row is always pending and un-delivered.
-    assert row.status == PENDING
-    assert row.published_at is None
-    assert row.last_error is None
-    # created_at / updated_at are column defaults (populated at flush), so
-    # they are allowed to be None here but must be present as attributes.
-    assert hasattr(row, "created_at") and hasattr(row, "updated_at")
+    for tracking_field in ("status", "published_at", "last_error"):
+        assert not hasattr(row, tracking_field), (
+            f"outbox row must not carry {tracking_field} — it is append-only"
+        )
+    assert hasattr(row, "created_at")
+
+
+def test_outbox_delivery_carries_the_state():
+    from shared.outbox import PENDING, OutboxDelivery
+
+    delivery = OutboxDelivery(event_id="e-1", status=PENDING)
+    assert delivery.event_id == "e-1"
+    assert delivery.status == PENDING
+    assert delivery.published_at is None
+    assert delivery.last_error is None
 
 
 class _UC(OutboxMixin):

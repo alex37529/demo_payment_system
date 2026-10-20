@@ -11,7 +11,7 @@ create_topic() {
   # `--if-not-exists` makes the creation itself idempotent: the check below
   # is racy when the init runs twice concurrently (a re-`up` without wiping
   # the volume), and the loser of that race used to fail the whole init with
-  # 'TopicExistsException' -> `docker compose up` aborted with exit 1.
+  # 'TopicExistsException'.
   if "$KAFKA_BIN/kafka-topics.sh" $BOOT --list 2>/dev/null | grep -xq "$name"; then
     echo "topic exists: $name"
   else
