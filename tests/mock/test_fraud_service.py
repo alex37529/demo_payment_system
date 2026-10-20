@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -80,3 +79,17 @@ async def test_invalid_mode_is_rejected(client):
     app, c, mod = client
     r = await c.post("/fraud/admin/fail", json={"mode": "nope"})
     assert r.status_code == 422
+
+
+async def test_status_endpoint_reflects_mode_and_hits(client):
+    # phase-6 spec §3.1: GET /fraud/status is a convenience on top of /fraud/admin/mode
+    c = client[1]
+    r = await c.post("/fraud/check", json={"payment_id": "P1", "amount": 1})
+    assert r.status_code == 200
+    s = await c.get("/fraud/status")
+    assert s.status_code == 200
+    body = s.json()
+    assert body["mode"] == "off"
+    assert "hits" in body
+    # after the check above at least one hit is recorded
+    assert body["hits"] >= 1
