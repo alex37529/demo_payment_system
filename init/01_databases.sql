@@ -67,23 +67,34 @@ CREATE TABLE IF NOT EXISTS applied_commands (
 );
 CREATE INDEX IF NOT EXISTS idx_applied_account ON applied_commands (account_id);
 
--- payments (ledger-context view; orchestrator owns lifecycle in phase 3).
-CREATE TABLE IF NOT EXISTS payments (
-    id         VARCHAR(64) PRIMARY KEY,
-    account_id VARCHAR(64) NOT NULL,
-    amount     BIGINT      NOT NULL,
-    currency   VARCHAR(8)  NOT NULL,
-    idem_key   VARCHAR(191) NOT NULL UNIQUE,
-    saga_id    VARCHAR(64) NOT NULL DEFAULT '',
-    state      VARCHAR(32) NOT NULL DEFAULT 'Created',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+-- payments table REMOVED (2026-10-19). Phase 3 moved the payment lifecycle
+-- to the orchestrator (sagas + outbox + events); the Phase-2 `payments`
+-- mirror was never populated (0 rows in production). Idempotent drop covers
+-- volumes provisioned before this change (init runs fresh only on empty data).
+DROP TABLE IF EXISTS payments;
+
+-- Balance journal (append-only, written in the same TX as the accounts
+-- mutation). One row per debit/refund with the running `balance_after`, so
+-- "what happened to this account's balance" is auditable in a single query.
+-- The ledger service also creates this on startup (Base.metadata.create_all);
+-- the DDL here makes a fresh volume consistent even before first boot.
+CREATE TABLE IF NOT EXISTS transactions (
+    id            BIGSERIAL  PRIMARY KEY,
+    account_id    VARCHAR(64) NOT NULL,
+    event_id      VARCHAR(36) NOT NULL UNIQUE,
+    event_type    VARCHAR(40) NOT NULL,
+    amount        BIGINT      NOT NULL,
+    currency      VARCHAR(8)  NOT NULL,
+    balance_after BIGINT      NOT NULL,
+    payment_id    VARCHAR(64) NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_payments_account ON payments (account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions (account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_payment ON transactions (payment_id);
+ALTER TABLE transactions OWNER TO fintech;
 
 ALTER TABLE accounts         OWNER TO fintech;
 ALTER TABLE applied_commands OWNER TO fintech;
-ALTER TABLE payments         OWNER TO fintech;
 
 -- Phase 3 — saga state (the `orchestrator` bounded context owns this table; the
 -- ledger DB above stays write-side only). State is the saga state name;

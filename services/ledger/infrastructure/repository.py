@@ -20,6 +20,26 @@ class SQLAlchemyAccountRepository(IAccountRepository):
     async def get(self, account_id: str, *, session: Any = None) -> AccountRow | None:
         return await session.get(AccountRow, account_id)
 
+    async def get_for_update(self, account_id: str, *, session: Any) -> AccountRow | None:
+        """Load the account row under a row lock (Postgres: ``SELECT ... FOR UPDATE``).
+
+        The use-case owns the session (one async transaction per command), so the
+        lock is released by that TX's ``commit``/``rollback``. A concurrent
+        debit/refund on the same account blocks until we commit, then sees the
+        fresh balance — the journal's ``balance_after`` therefore always matches
+        the committed ``accounts.balance``. Dialect without row locks (SQLite
+        tests) degrades to a plain SELECT — behaviour is identical for the
+        single-threaded test harness.
+        """
+        from sqlalchemy import select
+
+        stmt = select(AccountRow).where(AccountRow.id == account_id)
+        dialect = getattr(getattr(session, "bind", None), "dialect", None)
+        if getattr(dialect, "name", "") == "postgresql":
+            stmt = stmt.with_for_update()
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def save(self, account: Any, *, session: Any) -> None:
         """Apply the aggregate's state to the accounts row (no commit here)."""
         row = await session.get(AccountRow, account.account_id)
