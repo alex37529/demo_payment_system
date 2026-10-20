@@ -106,11 +106,14 @@ payments_processed_total = Counter(
 )
 
 #: Payments that failed. Labels: ``service`` + ``reason``
-#: (``fraud_decline`` / ``insufficient_funds`` / ``cb_open`` / …).
+#: (``fraud_decline`` / ``insufficient_funds`` / ``cb_open`` /
+#: ``watchdog_stalled`` / …) + ``step`` (the saga step that failed).
+#: The ``step`` label is what makes the graph actionable: it answers "which
+#: step did the saga die in" without a second query.
 payments_failed_total = Counter(
     "payments_failed_total",
     "Payments that failed",
-    ["service", "reason"],
+    ["service", "reason", "step"],
 )
 
 
@@ -119,9 +122,9 @@ def inc_processed(service: str = "ledger", amount: int = 1) -> None:
     payments_processed_total.labels(service=service).inc(amount)
 
 
-def inc_failed(reason: str, service: str = "orchestrator", amount: int = 1) -> None:
-    """Count a failed payment with a stable reason label."""
-    payments_failed_total.labels(service=service, reason=reason).inc(amount)
+def inc_failed(reason: str, service: str = "orchestrator", step: str = "", amount: int = 1) -> None:
+    """Count a failed payment with a stable reason + the saga step."""
+    payments_failed_total.labels(service=service, reason=reason, step=step).inc(amount)
 
 
 # --------------------------------------------------------------------------- #

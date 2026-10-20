@@ -185,7 +185,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Payments processed / failed",
-      "description": "Counter of completed payments (orchestrator + ledger) and failures bucketed by reason (fraud_decline / insufficient_funds / cb_open / …).",
+      "description": "Counter of completed payments (orchestrator + ledger) and failures bucketed by reason (watchdog_stalled / fraud_decline / insufficient_funds / cb_open) and by the saga step that failed. NOTE: a failing command produces NO event, so a saga that dies at 'reserve' shows up here only when the watchdog compensates it — see doc/done/07_observability_tests.md §6.",
       "datasource": { "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 6, "x": 18, "y": 13 },
       "fieldConfig": {
@@ -203,8 +203,8 @@
         },
         {
           "refId": "B",
-          "expr": "sum by (reason) (payments_failed_total)",
-          "legendFormat": "failed {{reason}}"
+          "expr": "sum by (reason, step) (payments_failed_total)",
+          "legendFormat": "failed {{reason}}{{if step}} ({{step}}){{end}}"
         }
       ]
     }

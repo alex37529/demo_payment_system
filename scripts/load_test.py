@@ -38,6 +38,30 @@ import httpx
 ACCOUNTS = [f"U{i:03d}" for i in range(1, 21)]
 CURRENCIES = ["USD", "EUR"]
 
+#: Amount range in MINOR units (cents). It is deliberately kept BELOW the
+#: mock-fraud decline threshold (1000 cents = $10): an amount of $10 or more
+#: is declined by the fraud rule, so the payment would die at the fraud step
+#: and NEVER reach the debit — the harness would then measure the intake's
+#: HTTP latency while nothing was actually settled. The mock-acquirer uses the
+#: same range for the same reason.
+MIN_AMOUNT_CENTS = 50
+MAX_AMOUNT_CENTS = 950
+
+
+def account_currency(account: str) -> str:
+    """The currency of a seeded account.
+
+    The seed alternates: U001 USD, U002 EUR, U003 USD, … (odd = USD,
+    even = EUR). Sending the WRONG currency is refused by the ledger at the
+    reserve step (own-currency invariant, ADR-003) — the payment then dies
+    before the debit, and the harness would "pass" while nothing was
+    actually settled. Same rule as the mock-acquirer.
+    """
+    digits = "".join(ch for ch in account if ch.isdigit())
+    if digits and int(digits) % 2 == 0:
+        return "EUR"
+    return "USD"
+
 
 async def one(client: httpx.AsyncClient, url: str, account: str,
               currency: str, amount: int) -> tuple[float, int]:
@@ -87,8 +111,8 @@ async def run(tps: int, duration: int, url: str, timeout: float) -> dict:
             if slot > now - start:
                 await asyncio.sleep(min(slot - (now - start), interval))
             account = random.choice(ACCOUNTS)
-            currency = "USD" if account in ("U001", "U003", "U005", "U007") else "EUR"
-            amount = random.randint(1000, 100_000)
+            currency = account_currency(account)
+            amount = random.randint(MIN_AMOUNT_CENTS, MAX_AMOUNT_CENTS)
             task = asyncio.create_task(
                 one(client, url, account, currency, amount)
             )

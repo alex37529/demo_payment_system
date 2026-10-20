@@ -44,6 +44,7 @@ from shared.outbox import (
     FAILED,
     PENDING,
     PUBLISHED,
+    OutboxDelivery,
     OutboxEvent,
 )
 
@@ -102,34 +103,47 @@ class DeliveryTracker:
             await asyncio.sleep(interval)
 
     async def sweep_once(self, *, horizon_seconds: float = DEFAULT_HORIZON_S) -> dict:
-        """One pass: detect delivered, update DB. Returns counters."""
+        """One pass: detect delivered, update the delivery state.
+
+        The outbox itself is APPEND-ONLY (ADR-008): writing the delivery
+        state back into `outbox_events` would be an UPDATE of a captured
+        table, and Debezium would publish a SECOND message for the same
+        event — which broke the "one message per event" invariant.
+        """
         now = datetime.now(UTC)
         seen = await self._detect_delivered_event_ids()
 
         counts = {"examined": 0, "published": 0, "failed": 0, "kept": 0}
         async with self.sf() as session:
+            # Pending = an outbox row we have no delivery record for yet.
             rows = (await session.execute(
                 select(OutboxEvent)
-                .where(OutboxEvent.status == PENDING)
+                .outerjoin(OutboxDelivery, OutboxDelivery.event_id == OutboxEvent.event_id)
+                .where(OutboxDelivery.event_id.is_(None))
                 .order_by(OutboxEvent.created_at.desc())
                 .limit(DEFAULT_MAX_ROWS_PER_SWEEP)
             )).scalars().all()
 
             for row in rows:
                 counts["examined"] += 1
+                delivery = OutboxDelivery(event_id=row.event_id, status=PENDING)
                 if row.event_id in seen:
-                    row.status = PUBLISHED
-                    row.published_at = now
-                    row.last_error = None
+                    delivery.status = PUBLISHED
+                    delivery.published_at = now
+                    delivery.last_error = None
                     counts["published"] += 1
-                    continue
-                age_s = self._age_seconds(row.created_at, now)
-                if age_s is not None and age_s >= horizon_seconds:
-                    row.status = FAILED
-                    row.last_error = f"no delivery after {int(age_s)}s (topic={self.topic})"
-                    counts["failed"] += 1
-                    continue
-                counts["kept"] += 1
+                else:
+                    age_s = self._age_seconds(row.created_at, now)
+                    if age_s is not None and age_s >= horizon_seconds:
+                        delivery.status = FAILED
+                        delivery.last_error = f"no delivery after {int(age_s)}s (topic={self.topic})"
+                        counts["failed"] += 1
+                    else:
+                        # Not delivered yet — leave it pending (no record, so
+                        # the next sweep looks at it again).
+                        counts["kept"] += 1
+                        continue
+                session.add(delivery)
             await session.commit()
         return counts
 

@@ -51,10 +51,15 @@ async def run_consumer(
                         amount=amount,
                         payment_id=payload.get("payment_id", ""),
                         reason=payload.get("reason", ""),
+                        saga_id=payload.get("saga_id", ""),
                     )
                     log.info("applied=%s cmd=%s payment_id=%s ref=%s",
                              res.get("applied"), cmd, res.get("payment_id"), res.get("ref"))
                 except LedgerError as e:
+                    # A business rejection. The use-case has already published
+                    # a `DebitFailed` event for it (ADR-010) — without that
+                    # event the saga would wait for a confirmation that is
+                    # never coming and hang until the watchdog fires.
                     log.warning("ledger command %s failed (business): %s", cmd, e)
                 except Exception:
                     log.exception("ledger command %s failed (unexpected)", cmd)

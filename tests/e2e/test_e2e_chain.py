@@ -205,28 +205,14 @@ async def test_own_currency_invariant_enforced(client):
     assert r2.json()["currency"] == "USD"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "KNOWN MONEY BUG (found by this E2E suite, phase-7): the saga reserves "
-        "the funds and then debits them, but NOTHING releases the hold on the "
-        "SUCCESS path — `cancel_reservation` is only issued as compensation on "
-        "failure. So `accounts.reserved` grows 1:1 with every successful "
-        "payment and `available = balance - reserved` shrinks for ever. Two "
-        "consequences: (1) a user whose balance EQUALS the payment amount "
-        "cannot pay it (reserve leaves available=0, then the debit is refused "
-        "with InsufficientFundsError), and (2) every account eventually "
-        "refuses payments it can afford. The fix is a money-domain change "
-        "(the Debit must consume the hold its own Reserve created) and "
-        "therefore needs its own ADR + phase, not a silent change inside the "
-        "observability phase. See doc/done/07_observability_tests.md §6."
-    ),
-    strict=False,
-)
 async def test_reservation_is_released_after_a_successful_payment(client):
     """A successful payment must leave NO hold on the account.
 
-    This is the observable symptom of the reservation leak: `reserved` grows
-    by the payment amount on every successful payment and is never given back.
+    This was the observable symptom of the reservation leak (phase-7 §6):
+    the saga reserved the funds and then debited them, but nothing released
+    the hold on the success path, so `reserved` grew by the payment amount
+    on every payment and `available` shrank for ever. Fixed by ADR-010 —
+    the debit consumes the hold of its own payment.
     """
     account_id = "U003"
     before = await _balance(client, account_id)
@@ -239,14 +225,15 @@ async def test_reservation_is_released_after_a_successful_payment(client):
     )
     assert after == before - 100
 
-    # The hold must be gone. The ledger's `reserved` is what the read-side
-    # does not expose, so this is asserted through the ledger API.
+    # The hold must be gone. The read-side does not expose `reserved`, so
+    # this is asserted through the ledger API — and per payment, so a
+    # concurrent payment on the same account cannot make it flaky.
     r = await client.get(f"http://localhost:8003/v1/accounts/{account_id}")
     assert r.status_code == 200
-    assert r.json()["reserved"]["value"] == 0, (
-        f"the reservation was not released: {r.json()}"
-    )
-
+    body = r.json()
+    assert body["holds"] == {}, f"the reservation was not released: {body}"
+    assert body["reserved"]["value"] == 0, f"the reservation was not released: {body}"
+    assert body["available"]["value"] == body["balance"]["value"]
 
 async def test_loki_receives_structured_logs():
     """The logs pillar must actually work: the service's JSON log line has to
@@ -321,21 +308,31 @@ async def test_trace_is_continuous_across_kafka(client):
         trace_id = await _poll(find_trace, timeout_s=20)
         assert trace_id, "no trace_id found in the intake logs"
 
-        async def spans() -> list[dict]:
-            r = await c.get(f"{tempo}/api/traces/{trace_id}")
+        async def services_of(trace: str) -> set[str]:
+            """The services that contributed spans to the trace.
+
+            Tempo delivers a trace INCREMENTALLY (one batch per service), so
+            "the trace exists" does NOT mean "the trace is complete" —
+            polling for existence can catch it with only the first batch
+            there. The wait condition is therefore the COMPLETENESS, not the
+            existence.
+            """
+            r = await c.get(f"{tempo}/api/traces/{trace}")
             if r.status_code != 200:
-                return []
-            return r.json().get("batches", [])
+                return set()
+            found: set[str] = set()
+            for b in r.json().get("batches", []):
+                for attr in b.get("scopeSpans", []) or b.get("resourceSpans", []):
+                    name = (attr.get("scope") or {}).get("name", "")
+                    if name:
+                        found.add(name)
+            return found
 
-        batches = await _poll(spans, timeout_s=20)
-        assert batches, f"trace {trace_id} not found in Tempo"
-
+        services = await _poll_until(
+            lambda: services_of(trace_id),
+            lambda s: len(s) >= 2,
+            timeout_s=30,
+        )
         # The spans must come from more than one service — that is exactly
         # what "the trace does not break at the Kafka boundary" means.
-        services = set()
-        for b in batches:
-            for attr in b.get("scopeSpans", []) or b.get("resourceSpans", []):
-                name = (attr.get("scope") or {}).get("name", "")
-                if name:
-                    services.add(name)
         assert len(services) >= 2, f"trace has spans from one service only: {services}"

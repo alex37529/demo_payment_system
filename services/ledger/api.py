@@ -19,6 +19,7 @@ import os
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import text
 from starlette.responses import JSONResponse
 
 from services.ledger.application import (
@@ -149,6 +150,16 @@ def attach_ledger(app: FastAPI) -> None:
     async def _ledger_lifespan(_app):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # `create_all` CREATES missing tables but never ALTERS an existing
+            # one, so the `accounts.holds` column (ADR-010) has to be added
+            # explicitly for a volume created before it existed.
+            # Idempotent — and Postgres-only syntax, so the SQLite test
+            # harness (which creates the schema from the models) skips it.
+            if conn.dialect.name == "postgresql":
+                await conn.execute(text(
+                    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+                    "holds JSONB NOT NULL DEFAULT '{}'::jsonb"
+                ))
         consumer_task = None
         tracker_task = None
         if _consumer_enabled():
@@ -318,6 +329,10 @@ def register_routes(app: FastAPI, tracker: DeliveryTracker) -> None:
                 "id": agg.account_id, "owner_name": agg.owner_name, "currency": agg.currency,
                 "balance": agg.balance.to_dict(), "reserved": agg.reserved.to_dict(),
                 "available": agg.available.to_dict(),
+                # The per-payment holds (ADR-010): which reservation is still
+                # holding money, and for which payment. Without this, a stuck
+                # hold is invisible — the account just looks "almost empty".
+                "holds": {pid: amount for pid, amount in agg.holds_items()},
             }
 
 

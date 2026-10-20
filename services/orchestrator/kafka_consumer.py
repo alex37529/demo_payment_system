@@ -146,7 +146,18 @@ async def run_consumers(
                         continue
                     method = getattr(handler, method_name)
                     try:
-                        await method(key, payload)
+                        # `on_compensation_applied` needs the event type (it
+                        # records WHICH compensation landed); the others take
+                        # (key, payload) only. Passing it only where it is
+                        # accepted keeps the two shapes apart — calling it
+                        # unconditionally raised a TypeError that was
+                        # swallowed here, so a confirmed compensation was
+                        # NEVER recorded (phase-3 bug, only visible once the
+                        # service's log records stopped being dropped).
+                        if method_name == "on_compensation_applied":
+                            await method(key, payload, event_type=etype)
+                        else:
+                            await method(key, payload)
                     except Exception:
                         log.exception("%s failed key=%s etype=%s", method_name, key, etype)
         finally:
