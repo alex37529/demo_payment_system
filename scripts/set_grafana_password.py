@@ -75,7 +75,7 @@ def grafana_cli(*args: str) -> tuple[int, str]:
     cmd = ["docker", "exec", GRAFANA_CONTAINER, "grafana", "cli",
            "--homepath", "/usr/share/grafana", *args]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
     except FileNotFoundError:
         return 127, "docker not found on PATH"
     except subprocess.TimeoutExpired:
