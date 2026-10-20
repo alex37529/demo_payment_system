@@ -198,6 +198,31 @@ def attach_gateway(app: FastAPI) -> None:
     async def status() -> JSONResponse:
         return JSONResponse(await svc._status())
 
+    @app.post("/v1/_alerts")
+    async def alerts(payload: dict) -> JSONResponse:
+        """Alertmanager webhook sink — turns an alert into a LOG LINE.
+
+        The PoC has no on-call channel (no Slack / PagerDuty), but an alert
+        that lands nowhere is indistinguishable from an alert that never
+        fired. Alertmanager posts the alert here; we log it in the same JSON
+        format the services use, so it becomes queryable in Loki
+        (`{service="gateway"} | level="ERROR"`) and visible in the Grafana
+        Logs tab. Replacing this with a real notifier = change the receiver
+        in observability/alertmanager/alertmanager.yml, nothing else.
+        """
+        for alert in payload.get("alerts", []) or []:
+            labels = alert.get("labels", {}) or {}
+            annotations = alert.get("annotations", {}) or {}
+            log.error(
+                "ALERT %s [%s] %s",
+                labels.get("alertname", "unknown"),
+                labels.get("severity", "?"),
+                annotations.get("summary", ""),
+                extra={"alertname": labels.get("alertname", ""),
+                       "severity": labels.get("severity", "")},
+            )
+        return JSONResponse({"ok": True, "received": len(payload.get("alerts", []) or [])})
+
     @asynccontextmanager
     async def _gw_lifespan(_app: FastAPI):
         log.info("gateway BFF ready (intake=%s profile=%s noti=%s orch=%s)",
