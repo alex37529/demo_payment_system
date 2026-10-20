@@ -386,22 +386,36 @@ def criterion_3_observability(rep: Report) -> None:
     if not traces:
         return
     trace_id = traces[0].get("traceID", "")
+
+    def services_of(trace: str) -> set[str]:
+        """The services that contributed spans to the trace.
+
+        Tempo delivers a trace INCREMENTALLY (one batch per service), so
+        "the trace exists" does NOT mean "the trace is complete" — the wait
+        condition is the COMPLETENESS (>= 4 services), not the existence.
+        """
+        try:
+            full = httpx.get(f"{TEMPO_URL}/api/traces/{trace}", timeout=20).json()
+        except (httpx.HTTPError, ValueError):
+            return set()
+        found: set[str] = set()
+        for batch in full.get("batches", []) or []:
+            for a in (batch.get("resource", {}) or {}).get("attributes", []) or []:
+                if a.get("key") == "service.name":
+                    found.add((a.get("value") or {}).get("stringValue", ""))
+        return found
+
+    services = poll(lambda: services_of(trace_id), lambda s: len(s) >= 4, timeout_s=30)
+    rep.check("trace spans gateway..ledger (>=4 services)", len(services) >= 4,
+              f"services={sorted(services)}")
+
     try:
         full = httpx.get(f"{TEMPO_URL}/api/traces/{trace_id}", timeout=20).json()
     except httpx.HTTPError:
         full = {}
-    services = set()
-    spans = 0
-    for batch in full.get("batches", []) or []:
-        # Tempo's JSON: the RESOURCE (service.name) is a sibling of scopeSpans
-        # on the batch, not inside a scope.
-        for a in (batch.get("resource", {}) or {}).get("attributes", []) or []:
-            if a.get("key") == "service.name":
-                services.add((a.get("value") or {}).get("stringValue", ""))
-        for scope in batch.get("scopeSpans", []) or []:
-            spans += len(scope.get("spans", []) or [])
-    rep.check("trace spans gateway..ledger (>=4 services)", len(services) >= 4,
-              f"services={sorted(services)}")
+    spans = sum(len(scope.get("spans", []) or [])
+                for batch in full.get("batches", []) or []
+                for scope in batch.get("scopeSpans", []) or [])
     rep.check("trace has >=5 spans", spans >= 5, f"spans={spans}")
 
     p99 = prom_value(
