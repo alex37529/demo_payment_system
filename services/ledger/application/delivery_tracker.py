@@ -154,21 +154,27 @@ class DeliveryTracker:
         from aiokafka import AIOKafkaConsumer, TopicPartition
 
         event_ids: set[str] = set()
+        # NB: construct the consumer WITHOUT a topic argument — a topic
+        # subscription and manual `assign(tps)` are mutually exclusive in
+        # aiokafka (`IllegalStateError: Subscription to topics, partitions and
+        # pattern are mutually exclusive`). We resolve partitions explicitly
+        # below. `partitions_for_topic` / `assign` / `seek` are synchronous in
+        # aiokafka (>= 0.6) — awaiting a bare `set` / `list` raises TypeError
+        # and poisons the sweep, so we leave the three sync calls un-awaited.
         consumer = AIOKafkaConsumer(
-            self.topic,
             bootstrap_servers=self.brokers,
             group_id="outbox-tracker",
             enable_auto_commit=False,
             max_poll_records=self.poll_batch,
         )
         try:
-            await consumer.start()
-            tps = [TopicPartition(self.topic, p)
-                   for p in (await consumer.partitions_for_topic(self.topic) or (0,))]
-            await consumer.assign(tps)
+            await consumer.start()  # coroutine in aiokafka>=0.6
+            parts = consumer.partitions_for_topic(self.topic)
+            tps = [TopicPartition(self.topic, p) for p in (parts or (0,))]
+            consumer.assign(tps)
             ends = await consumer.end_offsets(tps)           # dict[TopicPartition, int]
             for tp in tps:
-                await consumer.seek(tp, max(0, int(ends[tp]) - self.poll_batch))
+                consumer.seek(tp, max(0, int(ends[tp]) - self.poll_batch))
             deadline = time.monotonic() + self.poll_ms / 1000.0
             while time.monotonic() < deadline:
                 remaining_ms = max(5.0, (deadline - time.monotonic()) * 1000.0)

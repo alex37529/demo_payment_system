@@ -126,3 +126,23 @@ async def test_tracker_uses_injected_detection():
     tracker = DeliveryTracker(brokers="x", session_factory=object(), topic="ledger.events")
     tracker._detect_delivered_event_ids = _stub_for(frozenset({"a", "b"}))
     assert await tracker._detect_delivered_event_ids() == {"a", "b"}
+
+
+def test_aiokafka_consumer_signature_matches_delivery_tracker_usage():
+    """Guard: the three methods `_detect_delivered_event_ids` calls as SYNCHRONOUS
+    (no `await`) MUST remain plain methods — if a future aiokafka makes them
+    coroutines, the delivery tracker silently goes into the `except` branch
+    (and marks all outbox rows `failed`). Pin the signature to catch that.
+    """
+    import inspect
+
+    from aiokafka import AIOKafkaConsumer
+
+    for name in ("partitions_for_topic", "assign", "seek"):
+        attr = getattr(AIOKafkaConsumer, name)
+        assert not inspect.iscoroutinefunction(attr), f"AIOKafkaConsumer.{name} became async — delivery_tracker needs a fix"
+
+    # And the ones we DO await must still be async — pin those too.
+    for name in ("start", "stop", "end_offsets", "getmany"):
+        attr = getattr(AIOKafkaConsumer, name)
+        assert inspect.iscoroutinefunction(attr), f"AIOKafkaConsumer.{name} became sync — delivery_tracker needs a fix"
