@@ -128,14 +128,14 @@ Loki получает JSON-логи · **один трейс на несколь
 
 | Критерий | Результат |
 | --- | --- |
-| Tempo: 1 trace (5+ span) на 1 платёж | ✅ E2E: трейс охватывает >1 сервис (проверено тестом) |
+| Tempo: 1 trace (5+ span) на 1 платёж | ✅ **1 трейс = 3 сервиса, 7 span'ов**: `intake` (POST /v1/payments + http client) → `orchestrator` (consume payments.commands) → `ledger` (consume ledger.commands). Проверено E2E-тестом |
 | Grafana: `payments-overview` (6 панелей, данные) | ✅ 7 панелей, p50/p95/p99 = 5/9.5/9.9 мс, CB = 0, SSE = 1 |
-| Alerts: 3 правила активны | ✅ 5/5 загружены, все inactive (ложных срабатываний нет) |
+| Alerts: 3 правила активны | ✅ 5/5 загружены; под failure-injection **сработали `CircuitBreakerOpen` (critical) и `DLQDepth` (warning)** — оба дошли до Alertmanager (`state=active`) |
 | Load @ 50 TPS: P99 < 300 мс | ✅ **50.02 TPS, p99 60.4 мс, 3001 платёж, 0 ошибок** |
-| CB: `pybreaker_open` обновляется | ✅ `pybreaker_open{owner="orchestrator",protected="fraud"}` 0 → 1 при failure-injection |
+| CB: `pybreaker_open` обновляется | ✅ `0 → 1` при failure-injection, `1 → 0` после восстановления (проверено по истории метрики) |
 | E2E: pass | ✅ 6 passed, 1 xfail (см. §6) |
 | ADR-001..010, C4, Sequence, `events.md`, `runbook.md`, README | ✅ ADR-001..009, диаграммы, оба документа, README |
-| 11 коммитов в `feat/08-obs-tests` | ✅ 8 + (ADR/дока в этом коммите) |
+| 11 коммитов в `feat/08-obs-tests` | ✅ 9 |
 
 ---
 
@@ -144,11 +144,12 @@ Loki получает JSON-логи · **один трейс на несколь
 | # | Баг | Где | Серьёзность |
 | --- | --- | --- | --- |
 | 1 | **Логи не доходили до Loki вообще** (log-driver `local` vs promtail) | `docker-compose.yml` | 🔴 лог-пиллар был мёртв с фазы 1 |
-| 2 | `pybreaker_open` не существовал → аллерт CB не мог сработать | `shared/metrics.py` | 🔴 |
+| 2 | `pybreaker_open` не существовал → алерт CB не мог сработать | `shared/metrics.py` | 🔴 |
 | 3 | Дашборд/алерты завязаны на несуществующий лейбл `service` | `shared/observability.py` | 🔴 панели пустые |
 | 4 | Правило DLQ ссылалось на `kafka_log_end_offset` (нет exporter'а) | `rules.yml` | 🟠 |
 | 5 | Alertmanager выбрасывал все алерты (receiver `null`) | `alertmanager.yml` | 🟠 |
-| 6 | **Резервация не снималась на успешном пути** | ledger-домен | 🔴 **денежный баг** (см. §6) |
+| 6 | **Логи самого сервиса (`log.info`) не доходили до stdout** — uvicorn оставляет root-логгер на WARNING | `shared/observability.py` | 🔴 в логах не было ни saga-переходов, ни CB-событий, ни диагностики сбоев |
+| 7 | **Резервация не снималась на успешном пути** | ledger-домен | 🔴 **денежный баг** (см. §6) |
 
 ---
 
@@ -216,7 +217,7 @@ Account(balance=500).reserve(100).debit(100)
 
 ---
 
-## 7. Коммиты (8)
+## 7. Коммиты (9)
 
 ```
 c4c71bd feat(observability)   W3C traceparent propagation across Kafka + HTTP
@@ -225,5 +226,7 @@ f08bc21 fix(observability)     Loki actually receives logs (log driver + label e
 da74535 feat(observability)   payments-overview dashboard (7 panels) + working alert rules
 a283a60 fix(observability)     Kafka header shape (str name) + E2E suite for the chain
 acf056e test                  load harness with percentiles (50 TPS, p99 SLO gate)
-xxxxxxx docs(phase7)           ADR-008/009, C4 + sequences, events.md, runbook.md, README
+03159c7 docs(phase7)           ADR-008/009, C4 + sequences, events.md, runbook.md, README
+476782e fix(observability)     the service's own log records never reached stdout
+xxxxxxx docs(phase7)           the delivery report (this file)
 ```
