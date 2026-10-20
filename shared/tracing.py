@@ -48,22 +48,23 @@ BAGGAGE_HEADER = "baggage"
 _tracer = get_tracer("fintech.kafka")
 
 
-def inject_headers() -> list[tuple[bytes, bytes]]:
+def inject_headers() -> list[tuple[str, bytes]]:
     """Build the Kafka headers carrying the current trace context.
 
     Returns an empty list when no span is active (e.g. a background task with
     no parent) — the message is then simply untraced, which is correct: an
     untraced message must not fabricate a parent.
+
+    Header shape: aiokafka types it as ``Sequence[tuple[str, bytes]]`` — the
+    NAME is a str, the VALUE is bytes. (Passing ``bytes`` for the name makes
+    the producer raise "Expected str, got bytes" and the publish fails.)
     """
     carrier: dict[str, str] = {}
     propagate.inject(carrier)
-    headers: list[tuple[bytes, bytes]] = []
-    for name, value in carrier.items():
-        headers.append((name.encode("utf-8"), value.encode("utf-8")))
-    return headers
+    return [(name, value.encode("utf-8")) for name, value in carrier.items()]
 
 
-def extract_context(headers: list[tuple[bytes, bytes]] | None) -> otel_context.Context:
+def extract_context(headers: list[tuple[str, bytes]] | None) -> otel_context.Context:
     """Rebuild the remote trace context from Kafka message headers.
 
     An empty / missing header set yields the *current* (usually empty) context
@@ -82,7 +83,7 @@ def extract_context(headers: list[tuple[bytes, bytes]] | None) -> otel_context.C
 
 def start_consumer_span(
     name: str,
-    headers: list[tuple[bytes, bytes]] | None,
+    headers: list[tuple[str, bytes]] | None,
     *,
     topic: str = "",
     group: str = "",

@@ -86,7 +86,7 @@ class KafkaConsumer:
         self.group = group
         self.topics = topics
         self._c: AIOKafkaConsumer | None = None
-        self._last_headers: list[tuple[bytes, bytes]] = []
+        self._last_headers: list[tuple[str, bytes]] = []
 
     async def start(self) -> None:
         self._c = AIOKafkaConsumer(
@@ -124,7 +124,7 @@ class KafkaConsumer:
             yield (msg.key.decode() if msg.key else ""), json.loads(msg.value)
 
     @property
-    def last_headers(self) -> list[tuple[bytes, bytes]]:
+    def last_headers(self) -> list[tuple[str, bytes]]:
         """Headers of the most recently yielded record (trace context)."""
         return self._last_headers
 
