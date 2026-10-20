@@ -54,11 +54,21 @@ def _failure_reason(failed_step: str, reason: str) -> str:
     A Prometheus label must not carry a free-text reason (unbounded
     cardinality — one series per distinct message). We bucket by the saga step
     and the few known reasons; everything else collapses to ``other``.
+
+    The order matters: the watchdog's reason is
+    ``"watchdog_timeout: saga stalled in in-flight state"`` — it CONTAINS the
+    word "timeout", but it is NOT a timeout. It means "the saga never got an
+    answer and the watchdog had to compensate it". Bucketing it as
+    ``timeout`` was actively misleading (it looked like a network/DB timeout
+    when the real cause is a command that failed a BUSINESS validation and
+    therefore produced no event at all).
     """
     text = (reason or "").lower()
+    if "watchdog" in text:
+        return "watchdog_stalled"
     if "circuit" in text or "circuit_open" in text:
         return "cb_open"
-    if "decline" in text:
+    if "decline" in text or "high_amount" in text:
         return "fraud_decline"
     if "insufficient" in text:
         return "insufficient_funds"
@@ -239,7 +249,7 @@ class SagaHandler:
 
         # Prometheus: every failure path converges here, so this is the one
         # place that counts failures (phase-7 spec §3.1 `payments_failed_total`).
-        inc_failed(_failure_reason(failed_step, reason))
+        inc_failed(_failure_reason(failed_step, reason), step=failed_step)
 
         if compensation:  # reverse the booked reservation (newest first)
             for cmd in compensation:
