@@ -1,0 +1,87 @@
+# fintech_demo — C4 (container) + sequences, D2 source
+#
+# Render:  d2 doc/diagrams/c4-container.d2 c4.svg
+# The same picture is kept as Mermaid in doc/diagrams/c4-container.md and
+# doc/diagrams/sequence.md (GitHub renders Mermaid natively).
+
+direction right
+
+customer: Customer {
+  shape: person
+}
+operator: Operator {
+  shape: person
+}
+
+fintech: fintech_demo {
+  shape: rectangle
+  label: fintech_demo
+
+  frontend: Frontend {
+    shape: browser
+    label: Frontend\nReact 18 + Vite
+  }
+  gateway: Gateway / BFF {
+    label: Gateway / BFF\nFastAPI :8000
+  }
+  intake: Intake {
+    label: Intake\nFastAPI :8001
+  }
+  orchestrator: Orchestrator {
+    label: Orchestrator\nFastAPI :8002
+  }
+  ledger: Ledger {
+    label: Ledger\nFastAPI :8003
+  }
+  profile: Profile {
+    label: Profile\nFastAPI :8004
+  }
+  notification: Notification {
+    label: Notification\nFastAPI :8005
+  }
+  mock_fraud: mock-fraud {
+    shape: hexagon
+  }
+  mock_acquirer: mock-acquirer {
+    shape: hexagon
+  }
+}
+
+kafka: Kafka (KRaft) {
+  shape: queue
+}
+pg: PostgreSQL {
+  shape: cylinder
+}
+redis: Redis {
+  shape: cylinder
+}
+fraud: Fraud API {
+  shape: hexagon
+}
+tempo: Tempo {
+  shape: cylinder
+}
+obs: Prometheus + Grafana + Loki {
+  shape: cylinder
+}
+
+customer -> frontend: uses
+frontend -> gateway: /v1/* + SSE
+gateway -> intake: POST /v1/payments
+gateway -> profile: GET /v1/users
+gateway -> notification: GET /v1/stream
+gateway -> orchestrator: GET /v1/circuit-breakers
+mock_acquirer -> intake: POST /v1/payments (load)
+intake -> kafka: payments.commands
+intake -> pg: idempotency_keys
+intake -> redis: idempotency
+orchestrator -> fraud: POST /fraud/check (CB)
+orchestrator -> kafka: ledger.commands / payments.events / DLQ
+orchestrator -> pg: sagas
+ledger -> kafka: ledger.commands
+ledger -> pg: accounts, applied_commands,\noutbox_events, transactions
+kafka -> profile: ledger.events (CDC)
+kafka -> notification: ledger.events (CDC)
+fintech -> tempo: spans (OTLP)
+fintech -> obs: metrics + logs
