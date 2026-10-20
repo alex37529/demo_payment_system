@@ -9,8 +9,11 @@ set -euo pipefail
 echo "seed: verifying 20 seeded users (init/01_databases.sql runs on first boot)"
 L=$(docker compose exec -T postgres psql -U fintech -d ledger -tAc \
      "SELECT count(*) FROM accounts WHERE id LIKE 'U0%'")
+# The profile DB has its table in the PUBLIC schema (`users`); the `profile`
+# DB *is* the bounded context — there is no `profile` schema inside it, so
+# `profile.users` would fail with 'relation does not exist'.
 P=$(docker compose exec -T postgres psql -U fintech -d profile -tAc \
-     "SELECT count(*) FROM profile.users")
+     "SELECT count(*) FROM users")
 echo "  ledger.accounts : $L"
 echo "  profile.users   : $P"
 if [[ "${L:-0}" != "20" || "${P:-0}" != "20" ]]; then

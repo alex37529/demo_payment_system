@@ -1,10 +1,14 @@
-"""Outbox Delivery Tracker tests — closes the Phase-2 `outbox_events.status` gap.
+"""Outbox Delivery Tracker tests — the delivery state of the outbox.
 
-Verifies the three transitions `sweep_once()` can produce, without touching
+Verifies the three outcomes `sweep_once()` can produce, without touching
 real Kafka (we monkeypatch `_detect_delivered_event_ids` to return a fixed set):
-  * pending + seen        -> published (published_at set, last_error cleared);
-  * pending + old + not seen -> failed (last_error filled);
-  * pending + recent + not seen -> stays pending.
+  * not delivered + seen            -> published (published_at set);
+  * not delivered + old + not seen  -> failed (last_error filled);
+  * not delivered + recent + not seen -> stays pending (no delivery record).
+
+The delivery state lives in `outbox_delivery`, NOT in `outbox_events`: the
+outbox is append-only, because every UPDATE of a captured table is another
+CDC message for the SAME event (ADR-008).
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from services.ledger.application import DeliveryTracker
 from shared.db.base import Base
-from shared.outbox import FAILED, PENDING, PUBLISHED, OutboxEvent
+from shared.outbox import FAILED, PUBLISHED, OutboxDelivery, OutboxEvent
 
 
 @pytest_asyncio.fixture
@@ -46,9 +50,11 @@ async def _insert(sf, *, when: datetime, seen: bool) -> OutboxEvent:
     return row
 
 
-async def _get(sf, eid: str) -> OutboxEvent:
+async def _get(sf, eid: str) -> OutboxDelivery:
+    """The DELIVERY record of an event (None while it is still pending)."""
     async with sf() as s:
-        r = (await s.execute(select(OutboxEvent).where(OutboxEvent.event_id == eid))).scalars().one()
+        r = (await s.execute(
+            select(OutboxDelivery).where(OutboxDelivery.event_id == eid))).scalars().first()
     return r
 
 
@@ -61,9 +67,14 @@ async def test_seen_becomes_published(env):
     counts = await tracker.sweep_once(horizon_seconds=300)
     assert counts["published"] == 1 and counts["failed"] == 0
     again = await _get(sf, row.event_id)
-    assert again.status == PUBLISHED
+    assert again is not None and again.status == PUBLISHED
     assert again.published_at is not None
     assert again.last_error is None
+    # The outbox row itself is untouched — it is append-only (ADR-008).
+    async with sf() as s:
+        raw = (await s.execute(
+            select(OutboxEvent).where(OutboxEvent.event_id == row.event_id))).scalars().one()
+    assert not hasattr(raw, "status")
 
 
 async def test_old_unseen_becomes_failed(env):
@@ -75,7 +86,7 @@ async def test_old_unseen_becomes_failed(env):
     counts = await tracker.sweep_once(horizon_seconds=60)
     assert counts["failed"] == 1 and counts["published"] == 0
     again = await _get(sf, row.event_id)
-    assert again.status == FAILED
+    assert again is not None and again.status == FAILED
     assert again.last_error is not None and "no delivery" in again.last_error
     assert again.published_at is None
 
@@ -88,19 +99,19 @@ async def test_recent_unseen_stays_pending(env):
     tracker._detect_delivered_event_ids = _stub_for(frozenset())
     counts = await tracker.sweep_once(horizon_seconds=300)
     assert counts["kept"] == 1 and counts["published"] == 0 and counts["failed"] == 0
+    # Still pending -> NO delivery record yet (so the next sweep looks again).
     again = await _get(sf, row.event_id)
-    assert again.status == PENDING
+    assert again is None
 
 
 async def test_sweep_only_touches_pending_rows(env):
     sf = env
     now = datetime.now(UTC)
     fresh = await _insert(sf, when=now - timedelta(seconds=1), seen=True)
-    # pre-mark the fresh row as PUBLISHED directly to simulate "already handled".
+    # pre-mark the event as PUBLISHED (a delivery record exists) to simulate
+    # "already handled" — the sweep must leave it alone.
     async with sf() as s:
-        r = (await s.execute(select(OutboxEvent).where(OutboxEvent.event_id == fresh.event_id))).scalars().one()
-        r.status = PUBLISHED
-        r.published_at = now
+        s.add(OutboxDelivery(event_id=fresh.event_id, status=PUBLISHED, published_at=now))
         await s.commit()
     tracker = DeliveryTracker(brokers="x", session_factory=sf, topic="ledger.events")
     tracker._detect_delivered_event_ids = _stub_for(frozenset())

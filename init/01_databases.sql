@@ -11,20 +11,29 @@ CREATE DATABASE profile OWNER fintech;
 -- The outbox table lives in the `ledger` context (write-side, phase 2). Debezium
 -- reads this table's inserts (WAL) and publishes to Kafka (topic `ledger.events`).
 \connect ledger
+-- The outbox is APPEND-ONLY (ADR-008): one row per event, never updated.
+-- Every UPDATE of a captured table is another change event for Debezium, so
+-- the delivery state lives in `outbox_delivery` (NOT captured).
 CREATE TABLE IF NOT EXISTS outbox_events (
     id           BIGSERIAL PRIMARY KEY,
     event_id     VARCHAR(36) NOT NULL UNIQUE,
     topic        VARCHAR(128) NOT NULL,
     payload      JSONB NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_topic ON outbox_events (topic);
+CREATE INDEX IF NOT EXISTS idx_outbox_created_at ON outbox_events (created_at);
+
+-- The delivery state of an outbox event (pending -> published | failed).
+CREATE TABLE IF NOT EXISTS outbox_delivery (
+    event_id     VARCHAR(36) PRIMARY KEY,
     status       VARCHAR(32) NOT NULL DEFAULT 'pending',
     published_at TIMESTAMPTZ,
     last_error   VARCHAR(512),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_outbox_topic ON outbox_events (topic);
-CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events (status);
-CREATE INDEX IF NOT EXISTS idx_outbox_created_at ON outbox_events (created_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_delivery_status ON outbox_delivery (status);
 
 -- Upgrade already-provisioned volumes (created before status tracking existed).
 -- ADD COLUMN IF NOT EXISTS is a no-op when the column is already present.

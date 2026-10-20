@@ -8,10 +8,15 @@ BOOT="--bootstrap-server ${BOOTSTRAP}"
 
 create_topic() {
   local name="$1"
+  # `--if-not-exists` makes the creation itself idempotent: the check below
+  # is racy when the init runs twice concurrently (a re-`up` without wiping
+  # the volume), and the loser of that race used to fail the whole init with
+  # 'TopicExistsException'.
   if "$KAFKA_BIN/kafka-topics.sh" $BOOT --list 2>/dev/null | grep -xq "$name"; then
     echo "topic exists: $name"
   else
-    "$KAFKA_BIN/kafka-topics.sh" $BOOT --create --partitions 3 --replication-factor 1 --topic "$name"
+    "$KAFKA_BIN/kafka-topics.sh" $BOOT --create --if-not-exists \
+      --partitions 3 --replication-factor 1 --topic "$name"
     echo "created: $name"
   fi
 }
