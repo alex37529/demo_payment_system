@@ -57,24 +57,40 @@ class AppliedCommandRow(Base):
         DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
-class PaymentRow(Base):
-    """Payment (ledger-context view). In phase 2 a thin mirror of the payment
-    being acted upon; orchestrator owns the full lifecycle in phase 3.
+# NOTE: a `payments` table used to live here as a Phase-2 "thin mirror" of the
+# payment being acted upon. Phase 3 moved ownership of the full payment
+# lifecycle to the orchestrator (`orchestrator.sagas` + `ledger.outbox_events`).
+# This class + its DDL were dead code (never INSERTed, never SELECTed, 0 rows
+# in production) and were removed on 2026-10-19.
+
+
+class TransactionRow(Base):
+    """Append-only per-account balance journal (write-side, DB `ledger`).
+
+    One row per balance-moving op (debit / refund), written in the SAME
+    transaction as the `accounts` mutation, the idempotency guard and the
+    outbox event — so a commit atomically reflects both the balance AND its
+    audit row, and a rolled-back / replayed command leaves *zero* rows.
+
+    Shape is a classic running-balance journal:
+      * `amount`       — magnitude of the op (always >= 0, minor units);
+      * `event_type`   — direction: `FundsDebited` (= money left) vs
+                         `RefundPosted` (= money came back);
+      * `balance_after`— the account balance immediately AFTER the op. The
+                         last row's `balance_after` == current `accounts.balance`,
+                         so the whole history can be audited in one query.
+    `payment_id` + `event_id` tie the row back to the saga / canonical event.
     """
 
-    __tablename__ = "payments"
+    __tablename__ = "transactions"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)  # FundsDebited / RefundPosted
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)       # magnitude, >= 0
     currency: Mapped[str] = mapped_column(String(8), nullable=False)
-    idem_key: Mapped[str] = mapped_column(String(191), unique=True, index=True)
-    saga_id: Mapped[str] = mapped_column(String(64), default="")
-    state: Mapped[str] = mapped_column(String(32), default="Created")
+    balance_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payment_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
-    )

@@ -99,3 +99,22 @@ async def test_refund_and_cancel_reservation(client):
 async def test_get_missing_account_is_404(client):
     app, c = client
     assert (await c.get("/v1/accounts/NOPE")).status_code == 404
+
+
+async def test_transactions_endpoint(client):
+    app, c = client
+    await c.post("/v1/accounts/A1/debit", json={"amount": 100, "currency": "USD", "payment_id": "T1"})
+    await c.post("/v1/accounts/A1/refund", json={"amount": 100, "currency": "USD", "payment_id": "T2"})
+    r = await c.get("/v1/accounts/A1/transactions")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 2
+    assert body["current_balance"] == 500
+    txs = body["transactions"]  # newest first
+    assert [t["event_type"] for t in txs] == ["RefundPosted", "FundsDebited"]
+    assert [t["balance_after"] for t in txs] == [500, 400]
+
+
+async def test_transactions_unknown_account_is_404(client):
+    app, c = client
+    assert (await c.get("/v1/accounts/NOPE/transactions")).status_code == 404

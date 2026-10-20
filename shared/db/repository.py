@@ -14,6 +14,18 @@ class IAccountRepository(ABC):
     async def get(self, account_id: str) -> Any: ...
 
     @abstractmethod
+    async def get_for_update(self, account_id: str, *, session: Any) -> Any:
+        """Load the row under a row lock (Postgres: ``SELECT ... FOR UPDATE``).
+
+        The lock is held by the calling TX (session) until that session
+        commits or rolls back — callers that own the session release it
+        implicitly. Used by write-side use-cases to serialize concurrent
+        mutations on the same account so their ``balance_after`` journal
+        rows always equal the committed ``accounts.balance``.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def save(self, account: Any) -> None: ...
 
     @abstractmethod
